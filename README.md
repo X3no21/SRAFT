@@ -1,11 +1,7 @@
 # DistributedAuthenticationPUF
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21724794.svg)](https://doi.org/10.5281/zenodo.21724794)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-
-<!-- TODO: after the first Zenodo release, add the DOI badge here:
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.NNNNNNNN.svg)](https://doi.org/10.5281/zenodo.NNNNNNNN)
--->
-
 
 
 Research project on distributed authentication for a cluster of **ESP32** nodes, based on a **SRAM-PUF** (Physical Unclonable Function). The firmware implements a Raft-style consensus protocol (node join / remove / self-healing) together with a device integrity verification protocol (**HAtt**) and **SRAFT**, a PUF-based authentication protocol that is the main contribution of this work.
@@ -302,13 +298,16 @@ Each tagged release of this repository is archived on Zenodo with its own DOI. I
   howpublished = {Zenodo},
   version      = {v1.0.0},
   year         = {2026},
-  doi          = {10.5281/zenodo.NNNNNNNN},
-  url          = {https://doi.org/10.5281/zenodo.NNNNNNNN}
+  doi          = {10.5281/zenodo.21724795},
+  url          = {https://doi.org/10.5281/zenodo.21724795}
 }
 ```
 
-> **TODO:** replace `NNNNNNNN` with the version DOI minted by Zenodo for the
-> first release, and add the DOI badge at the top of this file and the `doi:`
-> field in [CITATION.cff](CITATION.cff).
+Zenodo mints two DOIs for this artifact:
+
+| DOI | Resolves to | Use it for |
+|---|---|---|
+| [10.5281/zenodo.21724794](https://doi.org/10.5281/zenodo.21724794) | Always the latest release (concept DOI) | Linking to the project in general — this is the badge above |
+| [10.5281/zenodo.21724795](https://doi.org/10.5281/zenodo.21724795) | `v1.0.0` specifically (version DOI) | Citing in a paper, where reproducibility requires a frozen snapshot |
 
 GitHub also renders a ready-made citation from [CITATION.cff](CITATION.cff) via the *Cite this repository* button.
