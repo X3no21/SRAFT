@@ -1,0 +1,32 @@
+{
+  "title": "SRAFT: Lightweight Distributed Device Authentication and Software Attestation for IoT Devices Based on Physical Unclonable Functions",
+  "description": "<p>Reference implementation, test-campaign orchestration and raw experimental data for <strong>SRAFT</strong>, a lightweight distributed protocol for PUF-based device authentication and software attestation in local IoT networks without a continuously reachable trusted authority.</p><p>SRAFT partitions each device's Challenge-Response Pair (CRP) set across multiple Verifiers so that no single device holds the complete credential set, elects a Coordinator via Raft that never stores full CRP data, and gates Coordinator eligibility behind distributed software attestation (HAtt).</p><p>Contents:</p><ul><li><code>main/</code> &ndash; ESP-IDF firmware (C) for ESP32-WROOM-32E: SRAM PUF driver, SRAFT authentication, join/remove/self-healing, Raft consensus, HAtt integrity verification, node REST API, plus mTLS and MQTTS baseline implementations.</li><li><code>scripts/</code> &ndash; build/deploy tooling, Raspberry Pi monitoring server and PostgreSQL logging, experiment orchestration and plot generation, TLS/MQTTS baseline setup.</li><li><code>experimental_results/</code> &ndash; raw measurement data of the test campaigns (duration, CPU load, memory consumption, power consumption) per cluster size, for the SRAFT, TLS and MQTTS configurations.</li><li><code>docs/</code> &ndash; deployment notes.</li></ul><p>This archive is the artifact accompanying the paper of the same name. Note that WiFi credentials, database passwords and TLS key material are shipped as documented placeholders and must be provided by the user; see the README.</p>",
+  "upload_type": "software",
+  "license": "mit",
+  "language": "eng",
+  "access_right": "open",
+  "creators": [
+    {
+      "name": "Pagano, Francesco",
+      "affiliation": "University of Verona",
+      "orcid": "0000-0003-1485-0068"
+    },
+    {
+      "name": "Ceccato, Mariano",
+      "affiliation": "University of Verona",
+      "orcid": "0000-0001-7325-0316"
+    }
+  ],
+  "keywords": [
+    "IoT security",
+    "device authentication",
+    "software attestation",
+    "physical unclonable function",
+    "SRAM PUF",
+    "challenge-response pair",
+    "Raft consensus",
+    "remote attestation",
+    "ESP32",
+    "embedded systems"
+  ]
+}

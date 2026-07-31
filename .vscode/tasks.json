@@ -1,0 +1,92 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build - ESP-IDF",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-c",
+        "source /home/x3no21/.espressif/v6.0.2/esp-idf/export.sh && idf.py build"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": {
+        "owner": "cpp",
+        "fileLocation": "absolute",
+        "pattern": {
+          "regexp": "^(.*):(\\d+):(\\d+):\\s+(warning|error|info):\\s+(.*)$",
+          "file": 1, "line": 2, "column": 3, "severity": 4, "message": 5
+        }
+      }
+    },
+    {
+      "label": "Clean - ESP-IDF",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-c",
+        "source /home/x3no21/.espressif/v6.0.2/esp-idf/export.sh && idf.py clean"
+      ],
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "options": { "cwd": "${workspaceFolder}" }
+    },
+    {
+      "label": "Flash - ESP-IDF",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-c",
+        "source /home/x3no21/.espressif/v6.0.2/esp-idf/export.sh && idf.py -p ${config:idf.port} flash"
+      ],
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "options": { "cwd": "${workspaceFolder}" },
+      "dependsOn": "Build - ESP-IDF"
+    },
+    {
+      "label": "Monitor - ESP-IDF",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-c",
+        "source /home/x3no21/.espressif/v6.0.2/esp-idf/export.sh && idf.py -p ${config:idf.port} monitor"
+      ],
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "options": { "cwd": "${workspaceFolder}" },
+      "isBackground": true
+    },
+    {
+      "label": "Flash and Monitor - ESP-IDF",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-c",
+        "source /home/x3no21/.espressif/v6.0.2/esp-idf/export.sh && idf.py -p ${config:idf.port} flash monitor"
+      ],
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "options": { "cwd": "${workspaceFolder}" },
+      "dependsOn": "Build - ESP-IDF",
+      "isBackground": true
+    },
+    {
+      "label": "Configure - ESP-IDF",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-c",
+        "source /home/x3no21/.espressif/v6.0.2/esp-idf/export.sh && idf.py menuconfig"
+      ],
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "options": { "cwd": "${workspaceFolder}" }
+    }
+  ]
+}

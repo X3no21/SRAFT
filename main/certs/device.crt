@@ -1,0 +1,5 @@
+-----BEGIN PLACEHOLDER-----
+Placeholder for the device/broker certificate. Run
+scripts/tls/generate_certs.sh to generate it together with the matching key
+and CA. See main/certs/device.key for details.
+-----END PLACEHOLDER-----

@@ -1,0 +1,42 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "GDB via OpenOCD",
+      "type": "cppdbg",
+      "request": "launch",
+      "miDebuggerPath": "/home/x3no21/.espressif/tools/xtensa-esp-elf-gdb/17.1_20260402/xtensa-esp-elf-gdb/bin/xtensa-esp32-elf-gdb",
+      "program": "${workspaceFolder}/build/raft_esp32.elf",
+      "cwd": "${workspaceFolder}",
+      "MIMode": "gdb",
+      "miDebuggerServerAddress": "localhost:3333",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        },
+        {
+          "description": "Set Disassembly Flavor to Intel",
+          "text": "set disassembly-flavor intel",
+          "ignoreFailures": true
+        }
+      ],
+      "customLaunchSetupCommands": [
+        { "text": "target remote :3333" },
+        { "text": "set remote hardware-watchpoint-limit 2" },
+        { "text": "monitor reset halt" },
+        { "text": "thb app_main" },
+        { "text": "flushregs" }
+      ],
+      "stopAtEntry": false,
+      "externalConsole": false,
+      "logging": {
+        "engineLogging": false,
+        "programOutput": true,
+        "exceptions": true
+      },
+      "preLaunchTask": "Build - ESP-IDF"
+    }
+  ]
+}

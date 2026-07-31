@@ -1,0 +1,56 @@
+{
+  "files.associations": {
+    "discovery.h": "c",
+    "*.h": "c",
+    "*.c": "c",
+    "*.hpp": "cpp",
+    "*.cpp": "cpp",
+    "*.ino": "cpp",
+    "sdkconfig": "kconfig",
+    "random": "c",
+    "functional": "c"
+  },
+  "files.exclude": {
+    "**/build/**": true,
+    "**/cmake-build-*/**": true,
+    "**/.git/**": true
+  },
+  "search.exclude": {
+    "**/build/**": true,
+    "**/cmake-build-*/**": true,
+    "**/.git/**": true
+  },
+  "C_Cpp.intelliSenseEngine": "default",
+  "C_Cpp.errorSquiggles": "enabled",
+  "C_Cpp.default.compilerPath": "/home/x3no21/.espressif/tools/xtensa-esp-elf/esp-15.2.0_20251204/xtensa-esp-elf/bin/xtensa-esp32-elf-gcc",
+  "idf.espIdfPath": "/home/x3no21/.espressif/v6.0.2/esp-idf",
+  "idf.toolsPath": "/home/x3no21/.espressif",
+  "idf.pythonInstallPath": "/home/x3no21/.pyenv/shims/python",
+  "idf.port": "/dev/ttyS3",
+  "idf.baudRate": "115200",
+  "idf.openOcdConfigs": [
+    "board/esp32-wrover-kit-3.3v.cfg"
+  ],
+  "terminal.integrated.env.linux": {
+    "IDF_PATH": "/home/x3no21/.espressif/v6.0.2/esp-idf",
+    "PATH": "${env:PATH}:/home/x3no21/.espressif/v6.0.2/esp-idf/tools"
+  },
+  "cmake.configureOnOpen": false,
+  "cmake.buildDirectory": "${workspaceFolder}/build",
+  "idf.customExtraVars": {
+    "IDF_TARGET": "esp32"
+  },
+  "clangd.path": "/home/x3no21/.espressif/tools/esp-clang/esp-20.1.1_20250829/esp-clang/bin/clangd",
+  "clangd.arguments": [
+    "--background-index",
+    "--query-driver=**",
+    "--compile-commands-dir=/home/x3no21/git/DistributedAuthenticationPUF/build"
+  ],
+  "editor.formatOnSave": false,
+  "[c]": {
+    "editor.formatOnSave": false
+  },
+  "[cpp]": {
+    "editor.formatOnSave": false
+  }
+}

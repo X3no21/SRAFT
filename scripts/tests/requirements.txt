@@ -1,0 +1,6 @@
+requests
+loguru
+rich
+pandas
+openpyxl
+matplotlib

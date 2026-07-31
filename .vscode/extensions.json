@@ -1,0 +1,11 @@
+{
+    "recommendations": [
+        "espressif.esp-idf-extension",
+        "ms-vscode.cpptools",
+        "ms-vscode.cpptools-extension-pack",
+        "ms-vscode.cmake-tools",
+        "twxs.cmake",
+        "ms-vscode.vscode-serial-monitor",
+        "marus25.cortex-debug"
+    ]
+}

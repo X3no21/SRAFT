@@ -1,0 +1,5 @@
+-----BEGIN PLACEHOLDER-----
+Placeholder for the test CA certificate. Run
+scripts/tls/generate_certs.sh to generate it together with the device
+certificate and key. See main/certs/device.key for details.
+-----END PLACEHOLDER-----

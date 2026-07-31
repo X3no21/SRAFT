@@ -1,0 +1,40 @@
+cff-version: 1.2.0
+message: "If you use this software or the experimental data, please cite it as below."
+title: "SRAFT: Lightweight Distributed Device Authentication and Software Attestation for IoT Devices Based on Physical Unclonable Functions"
+abstract: >-
+  Reference implementation, test-campaign orchestration and raw experimental data
+  for SRAFT, a lightweight distributed protocol for PUF-based device authentication
+  and software attestation in local IoT networks without a continuously reachable
+  trusted authority. SRAFT shards each device's Challenge-Response Pair set across
+  multiple Verifiers, elects a Coordinator via Raft that never stores full CRP data,
+  and gates Coordinator eligibility behind distributed software attestation.
+type: software
+authors:
+  - family-names: Pagano
+    given-names: Francesco
+    orcid: "https://orcid.org/0000-0003-1485-0068"
+    affiliation: "University of Verona"
+    email: francesco.pagano@univr.it
+  - family-names: Ceccato
+    given-names: Mariano
+    orcid: "https://orcid.org/0000-0001-7325-0316"
+    affiliation: "University of Verona"
+    email: mariano.ceccato@univr.it
+license: MIT
+repository-code: "https://github.com/X3no21/SRAFT"
+# TODO: after the first Zenodo release, uncomment and fill in:
+# version: v1.0.0
+# date-released: "YYYY-MM-DD"
+# doi: 10.5281/zenodo.NNNNNNNN
+# identifiers:
+#   - type: doi
+#     value: 10.5281/zenodo.NNNNNNNN
+#     description: "Archived release of this repository on Zenodo"
+keywords:
+  - IoT security
+  - device authentication
+  - software attestation
+  - physical unclonable function
+  - SRAM PUF
+  - Raft consensus
+  - ESP32

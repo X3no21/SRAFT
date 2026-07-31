@@ -1,0 +1,11 @@
+fastapi 
+uvicorn 
+esptool
+loguru
+requests
+sqlalchemy
+httpx
+pandas 
+openpyxl
+psycopg2-binary
+pyserial
