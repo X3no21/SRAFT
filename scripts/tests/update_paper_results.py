@@ -116,14 +116,14 @@ def plot(name, data, caption, device=False, baseline=None):
 
 
 def role_table(data, filename):
-    lines = [r"\begingroup\color{blue}", r"\begin{tabular}{lcccc}", r"\hline",
+    lines = [r"\begin{tabular}{lcccc}", r"\hline",
              r"\textbf{Role} & \textbf{Duration (s)} & \textbf{CPU (\%)} & \textbf{Mem (\%)} & \textbf{Est. power (mW)} \\", r"\hline"]
     for role, title in [("coordinator", "Coordinator"), ("device", "Other devices")]:
         runs = data[data.role == role].groupby("run")[METRICS].mean()
         cells = [f"{runs[m].mean():.{3 if m == 'duration_s' else 2}f} $\\pm$ "
                  f"{runs[m].std(ddof=1):.{3 if m == 'duration_s' else 2}f}" for m in METRICS]
         lines.append(title + " & " + " & ".join(cells) + r" \\")
-    lines += [r"\hline", r"\end{tabular}", r"\endgroup"]
+    lines += [r"\hline", r"\end{tabular}"]
     (OUT / filename).write_text("\n".join(lines) + "\n")
 
 
@@ -163,8 +163,8 @@ def main():
         role_table(data, scenario + "_7nodes_table.tex")
     for scenario, stem, caption in [
         ("election", "RQ3_Scalability", "RQ3: Coordinator selection versus network size."),
-        ("removal", "RQ4_Removal", r"RQ4: Removal operation. \rev{Detection delay is excluded; no removal record is available at 3 devices.}"),
-        ("healing", "RQ4_Healing", r"RQ4: Healing phase after removal. \rev{Near-zero values are policy checks without replacement work; the redundancy target is recomputed for the surviving network.}")]:
+        ("removal", "RQ4_Removal", r"RQ4: Removal operation. Detection delay is excluded; no removal record is available at 3 devices."),
+        ("healing", "RQ4_Healing", r"RQ4: Healing phase after removal. Near-zero values are policy checks without replacement work; the redundancy target is recomputed for the surviving network.")]:
         plot(stem, raw[scenario], caption)
     for baseline in ["tls", "mqtts"]:
         plot("RQ5_Comparison_" + baseline.upper(), raw["authentication_sraft"],
@@ -229,12 +229,12 @@ def main():
             battery.append(dict(capacity_mah=capacity, period_s=period, energy_mj=energy,
                                 average_power_mw=power, lifetime_days=capacity*3.3/power/24))
     pd.DataFrame(battery).to_csv(OUT / "battery_estimates.csv", index=False)
-    battery_lines = [r"\begingroup\color{blue}", r"\begin{tabular}{lcc}", r"\hline",
+    battery_lines = [r"\begin{tabular}{lcc}", r"\hline",
                      r"\textbf{Capacity} & \textbf{$T=30$ min} & \textbf{$T=1$ min} \\", r"\hline"]
     for capacity in [500, 2500, 10000]:
         d = {r["period_s"]: r["lifetime_days"] for r in battery if r["capacity_mah"] == capacity}
         battery_lines.append(f"{capacity} mAh & {d[1800]:.0f} days & {d[60]:.1f} days" + r" \\")
-    battery_lines += [r"\hline", r"\end{tabular}", r"\endgroup"]
+    battery_lines += [r"\hline", r"\end{tabular}"]
     (OUT / "battery_table.tex").write_text("\n".join(battery_lines) + "\n")
     (OUT / "battery_inputs.json").write_text(json.dumps(dict(
         network_size=7, attestation_prover_mj=prover.auc_power_mw_seconds.mean(),
