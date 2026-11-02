@@ -1,0 +1,120 @@
+{
+  "inputs_sha256": {
+    "experimental_results/attack/attack_results.json": "8770036d413ca226fb237744c12bfdfb3d2a73cfa0f922ac997d9172df633195",
+    "experimental_results/attack/attack_summary.csv": "c7c4f9dbe7e979df94746e765cfee9ca42a998918d68868917e7c72ea4ed6d49",
+    "experimental_results/attack/attack_campaign.log": "bd65fb435468642798a76ef55e838bbc66caa1f6c7c381ee6f139e1b4ef57ecf",
+    "experimental_results/attack/removal_followup_results.json": "ae0a5ebcf524232e1ca527a25570466641a82dddee47774a8dcdacbc271feb1c",
+    "experimental_results/attack/removal_followup.log": "80b992b26cbdca97ed1f58303a98cec8e4281bd64ff893c2dad90db3157219e1"
+  },
+  "nodes": 7,
+  "csv_properties_checked": 9,
+  "observations": [
+    {
+      "case": "A",
+      "observation": "Modified request refused",
+      "count": 10,
+      "repetitions": 10
+    },
+    {
+      "case": "A",
+      "observation": "Replayed request dropped",
+      "count": 10,
+      "repetitions": 10
+    },
+    {
+      "case": "B",
+      "observation": "Invalid-proof query refused",
+      "count": 10,
+      "repetitions": 10
+    },
+    {
+      "case": "B",
+      "observation": "Genuine request answered (control)",
+      "count": 10,
+      "repetitions": 10
+    },
+    {
+      "case": "C",
+      "observation": "Incorrect-response impersonation rejected",
+      "count": 10,
+      "repetitions": 10
+    },
+    {
+      "case": "C",
+      "observation": "Genuine authentication accepted (control)",
+      "count": 10,
+      "repetitions": 10
+    },
+    {
+      "case": "D",
+      "observation": "All five recipients retained the target",
+      "count": 5,
+      "repetitions": 5
+    },
+    {
+      "case": "D",
+      "observation": "No removal applied and no divergent views",
+      "count": 5,
+      "repetitions": 5
+    },
+    {
+      "case": "D",
+      "observation": "Target still authenticated",
+      "count": 5,
+      "repetitions": 5
+    },
+    {
+      "case": "E",
+      "observation": "Altered member's Coordinator claim refused",
+      "count": 5,
+      "repetitions": 5
+    },
+    {
+      "case": "E",
+      "observation": "Nonmember injection dropped",
+      "count": 5,
+      "repetitions": 5
+    },
+    {
+      "case": "L",
+      "observation": "All six survivors removed crashed target and healed",
+      "count": 3,
+      "repetitions": 3
+    }
+  ],
+  "structural_exposure": [
+    {
+      "compromised_verifiers": 0,
+      "exposed_shards": 0,
+      "honest_paths_left": 3,
+      "prover_still_verifiable": true
+    },
+    {
+      "compromised_verifiers": 1,
+      "exposed_shards": 1,
+      "honest_paths_left": 2,
+      "prover_still_verifiable": true
+    },
+    {
+      "compromised_verifiers": 2,
+      "exposed_shards": 2,
+      "honest_paths_left": 1,
+      "prover_still_verifiable": true
+    },
+    {
+      "compromised_verifiers": 3,
+      "exposed_shards": 3,
+      "honest_paths_left": 0,
+      "prover_still_verifiable": false
+    }
+  ],
+  "interpretation": {
+    "A_B_C": "Ten repetitions per variant; no independent rebootstrap asserted.",
+    "D_E": "Five repetitions per variant; D is from the follow-up, E from the original campaign.",
+    "D": "Recipient evidence required; all five recipients retain the target without divergence in five follow-up runs.",
+    "L": "Three functional controls; six survivors remove a crashed node and heal.",
+    "exposure": "Structural accounting, not an empirical prediction attack.",
+    "timing": "The attack campaign does not measure removal, recovery, election latency or energy.",
+    "scope": "Threshold one requires assigned-Verifier evidence; a Coordinator also assigned as Verifier can confirm. No general Byzantine guarantee inferred."
+  }
+}

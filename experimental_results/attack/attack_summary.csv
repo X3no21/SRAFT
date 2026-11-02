@@ -1,0 +1,10 @@
+scenario,property,successes,trials,rate
+A,modified request refused,10,10,1.0000
+A,replayed request dropped,10,10,1.0000
+B,invalid-proof query refused,10,10,1.0000
+B,genuine request answered (control),10,10,1.0000
+C,impersonation rejected,10,10,1.0000
+C,genuine authentication accepted (control),10,10,1.0000
+D,honest Verifier kept shard on unconfirmed order,5,5,1.0000
+E,tampered-member usurpation refused,5,5,1.0000
+E,outsider injection dropped,5,5,1.0000

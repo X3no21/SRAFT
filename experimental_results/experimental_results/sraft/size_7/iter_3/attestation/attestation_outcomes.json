@@ -1,0 +1,47 @@
+{
+  "campaign_id": "size_7_iter_3_attestation_attest7",
+  "network_size": 7,
+  "devices": [
+    {
+      "ip": "192.168.1.103",
+      "mac": "90:15:06:94:52:2C",
+      "state": "follower"
+    },
+    {
+      "ip": "192.168.1.110",
+      "mac": "90:15:06:94:4F:24",
+      "state": "follower"
+    },
+    {
+      "ip": "192.168.1.111",
+      "mac": "D4:8C:49:E8:77:20",
+      "state": "follower"
+    },
+    {
+      "ip": "192.168.1.176",
+      "mac": "90:15:06:7C:25:90",
+      "state": "follower"
+    },
+    {
+      "ip": "192.168.1.59",
+      "mac": "90:15:06:94:52:00",
+      "state": "follower"
+    },
+    {
+      "ip": "192.168.1.79",
+      "mac": "90:15:06:94:4E:54",
+      "state": "follower"
+    },
+    {
+      "ip": "192.168.1.95",
+      "mac": "90:15:06:94:52:24",
+      "state": "leader"
+    }
+  ],
+  "outcomes": {
+    "passed": 7,
+    "failed": 0,
+    "no_answer": 0,
+    "error": 0
+  }
+}

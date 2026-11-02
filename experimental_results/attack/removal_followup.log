@@ -1,0 +1,270 @@
+2026-10-22 16:00:21.942 | INFO     | __main__:run_subset:384 - Attack subset ['legit', 'D']: 7 nodes
+2026-10-22 16:00:21.942 | INFO     | __main__:run_subset:396 - Functional: legitimate crash removal + heal
+2026-10-22 16:00:21.943 | INFO     | experimental_campaign:trigger_reset:110 - Triggering reset with offset=0, count=7...
+2026-10-22 16:00:39.967 | INFO     | experimental_campaign:trigger_reset:113 - Reset triggered.
+2026-10-22 16:00:40.257 | INFO     | experimental_campaign:trigger_deployment:99 - Triggering deployment with offset=0, count=7...
+2026-10-22 16:01:01.287 | INFO     | experimental_campaign:trigger_deployment:102 - Deployment triggered.
+2026-10-22 16:01:01.288 | INFO     | experimental_campaign:wait_for_ips:142 - Waiting for 7 nodes to come online (timeout: 180s)...
+2026-10-22 16:01:01.299 | INFO     | experimental_campaign:wait_for_ips:150 -    -> Discovered 7/7 nodes...
+2026-10-22 16:01:01.299 | INFO     | experimental_campaign:wait_for_ips:152 - Found all 7 nodes.
+2026-10-22 16:01:05.704 | INFO     | experimental_campaign:trigger_start_on_nodes:250 - Triggering /start in 'bootstrap' mode on 7 nodes via proxy...
+2026-10-22 16:01:11.238 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.103: Server error '500 Internal Server Error' for url 'http://192.168.1.103/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:01:11.268 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.110: Server error '500 Internal Server Error' for url 'http://192.168.1.110/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:01:11.325 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.111: Server error '500 Internal Server Error' for url 'http://192.168.1.111/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:01:11.425 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.176: Server error '500 Internal Server Error' for url 'http://192.168.1.176/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:01:11.528 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.59: Server error '500 Internal Server Error' for url 'http://192.168.1.59/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:01:11.630 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.79: Server error '500 Internal Server Error' for url 'http://192.168.1.79/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:01:11.734 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.95: Server error '500 Internal Server Error' for url 'http://192.168.1.95/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:03:06.746 | INFO     | experimental_campaign:wait_for_redundancy:453 - [attack_subset] Network ready after 121s: Coordinator 192.168.1.59, 7 members, 3/3 Verifiers each
+2026-10-22 16:05:22.221 | INFO     | experimental_campaign:wait_for_redundancy:453 - [attack_legit_removal] Network ready after 135s: Coordinator 192.168.1.59, 6 members, 2/2 Verifiers each
+2026-10-22 16:05:23.236 | INFO     | experimental_campaign:trigger_reset:110 - Triggering reset with offset=0, count=7...
+2026-10-22 16:05:41.256 | INFO     | experimental_campaign:trigger_reset:113 - Reset triggered.
+2026-10-22 16:05:41.348 | INFO     | experimental_campaign:trigger_deployment:99 - Triggering deployment with offset=0, count=7...
+2026-10-22 16:06:02.375 | INFO     | experimental_campaign:trigger_deployment:102 - Deployment triggered.
+2026-10-22 16:06:02.376 | INFO     | experimental_campaign:wait_for_ips:142 - Waiting for 7 nodes to come online (timeout: 180s)...
+2026-10-22 16:06:02.389 | INFO     | experimental_campaign:wait_for_ips:150 -    -> Discovered 6/7 nodes...
+2026-10-22 16:06:05.402 | INFO     | experimental_campaign:wait_for_ips:150 -    -> Discovered 6/7 nodes...
+2026-10-22 16:06:08.416 | INFO     | experimental_campaign:wait_for_ips:150 -    -> Discovered 7/7 nodes...
+2026-10-22 16:06:08.416 | INFO     | experimental_campaign:wait_for_ips:152 - Found all 7 nodes.
+2026-10-22 16:06:09.642 | INFO     | experimental_campaign:trigger_start_on_nodes:250 - Triggering /start in 'bootstrap' mode on 7 nodes via proxy...
+2026-10-22 16:06:15.186 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.103: Server error '500 Internal Server Error' for url 'http://192.168.1.103/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:06:15.253 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.110: Server error '500 Internal Server Error' for url 'http://192.168.1.110/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:06:15.352 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.111: Server error '500 Internal Server Error' for url 'http://192.168.1.111/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:06:15.454 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.176: Server error '500 Internal Server Error' for url 'http://192.168.1.176/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:06:15.556 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.59: Server error '500 Internal Server Error' for url 'http://192.168.1.59/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:06:15.659 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.79: Server error '500 Internal Server Error' for url 'http://192.168.1.79/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:06:15.763 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.95: Server error '500 Internal Server Error' for url 'http://192.168.1.95/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:08:18.861 | INFO     | experimental_campaign:wait_for_redundancy:453 - [attack_legit_restore] Network ready after 129s: Coordinator 192.168.1.79, 7 members, 3/3 Verifiers each
+2026-10-22 16:08:18.862 | INFO     | experimental_campaign:wait_for_ips:142 - Waiting for 7 nodes to come online (timeout: 180s)...
+2026-10-22 16:08:18.873 | INFO     | experimental_campaign:wait_for_ips:150 -    -> Discovered 7/7 nodes...
+2026-10-22 16:08:18.873 | INFO     | experimental_campaign:wait_for_ips:152 - Found all 7 nodes.
+2026-10-22 16:10:13.628 | INFO     | experimental_campaign:wait_for_redundancy:453 - [attack_legit_removal] Network ready after 114s: Coordinator 192.168.1.79, 6 members, 2/2 Verifiers each
+2026-10-22 16:10:14.770 | INFO     | experimental_campaign:trigger_reset:110 - Triggering reset with offset=0, count=7...
+2026-10-22 16:10:32.793 | INFO     | experimental_campaign:trigger_reset:113 - Reset triggered.
+2026-10-22 16:10:32.886 | INFO     | experimental_campaign:trigger_deployment:99 - Triggering deployment with offset=0, count=7...
+2026-10-22 16:10:53.914 | INFO     | experimental_campaign:trigger_deployment:102 - Deployment triggered.
+2026-10-22 16:10:53.914 | INFO     | experimental_campaign:wait_for_ips:142 - Waiting for 7 nodes to come online (timeout: 180s)...
+2026-10-22 16:10:53.926 | INFO     | experimental_campaign:wait_for_ips:150 -    -> Discovered 6/7 nodes...
+2026-10-22 16:10:56.938 | INFO     | experimental_campaign:wait_for_ips:150 -    -> Discovered 6/7 nodes...
+2026-10-22 16:10:59.951 | INFO     | experimental_campaign:wait_for_ips:150 -    -> Discovered 6/7 nodes...
+2026-10-22 16:11:02.964 | INFO     | experimental_campaign:wait_for_ips:150 -    -> Discovered 7/7 nodes...
+2026-10-22 16:11:02.964 | INFO     | experimental_campaign:wait_for_ips:152 - Found all 7 nodes.
+2026-10-22 16:11:03.839 | INFO     | experimental_campaign:trigger_start_on_nodes:250 - Triggering /start in 'bootstrap' mode on 7 nodes via proxy...
+2026-10-22 16:11:09.382 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.103: Server error '500 Internal Server Error' for url 'http://192.168.1.103/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:11:09.452 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.110: Server error '500 Internal Server Error' for url 'http://192.168.1.110/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:11:09.557 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.111: Server error '500 Internal Server Error' for url 'http://192.168.1.111/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:11:09.655 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.176: Server error '500 Internal Server Error' for url 'http://192.168.1.176/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:11:09.758 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.59: Server error '500 Internal Server Error' for url 'http://192.168.1.59/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:11:09.860 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.79: Server error '500 Internal Server Error' for url 'http://192.168.1.79/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:11:09.961 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.95: Server error '500 Internal Server Error' for url 'http://192.168.1.95/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:13:03.132 | INFO     | experimental_campaign:wait_for_redundancy:453 - [attack_legit_restore] Network ready after 119s: Coordinator 192.168.1.111, 7 members, 3/3 Verifiers each
+2026-10-22 16:13:03.133 | INFO     | experimental_campaign:wait_for_ips:142 - Waiting for 7 nodes to come online (timeout: 180s)...
+2026-10-22 16:13:03.143 | INFO     | experimental_campaign:wait_for_ips:150 -    -> Discovered 7/7 nodes...
+2026-10-22 16:13:03.143 | INFO     | experimental_campaign:wait_for_ips:152 - Found all 7 nodes.
+2026-10-22 16:15:13.586 | INFO     | experimental_campaign:wait_for_redundancy:453 - [attack_legit_removal] Network ready after 130s: Coordinator 192.168.1.111, 6 members, 2/2 Verifiers each
+2026-10-22 16:15:14.403 | INFO     | experimental_campaign:trigger_reset:110 - Triggering reset with offset=0, count=7...
+2026-10-22 16:15:32.433 | INFO     | experimental_campaign:trigger_reset:113 - Reset triggered.
+2026-10-22 16:15:32.531 | INFO     | experimental_campaign:trigger_deployment:99 - Triggering deployment with offset=0, count=7...
+2026-10-22 16:15:53.558 | INFO     | experimental_campaign:trigger_deployment:102 - Deployment triggered.
+2026-10-22 16:15:53.560 | INFO     | experimental_campaign:wait_for_ips:142 - Waiting for 7 nodes to come online (timeout: 180s)...
+2026-10-22 16:15:53.572 | INFO     | experimental_campaign:wait_for_ips:150 -    -> Discovered 6/7 nodes...
+2026-10-22 16:15:56.587 | INFO     | experimental_campaign:wait_for_ips:150 -    -> Discovered 6/7 nodes...
+2026-10-22 16:15:59.601 | INFO     | experimental_campaign:wait_for_ips:150 -    -> Discovered 6/7 nodes...
+2026-10-22 16:16:02.612 | INFO     | experimental_campaign:wait_for_ips:150 -    -> Discovered 7/7 nodes...
+2026-10-22 16:16:02.612 | INFO     | experimental_campaign:wait_for_ips:152 - Found all 7 nodes.
+2026-10-22 16:16:03.470 | INFO     | experimental_campaign:trigger_start_on_nodes:250 - Triggering /start in 'bootstrap' mode on 7 nodes via proxy...
+2026-10-22 16:16:08.998 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.103: Server error '500 Internal Server Error' for url 'http://192.168.1.103/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:16:09.080 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.110: Server error '500 Internal Server Error' for url 'http://192.168.1.110/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:16:09.183 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.111: Server error '500 Internal Server Error' for url 'http://192.168.1.111/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:16:09.278 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.176: Server error '500 Internal Server Error' for url 'http://192.168.1.176/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:16:09.378 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.59: Server error '500 Internal Server Error' for url 'http://192.168.1.59/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:16:09.483 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.79: Server error '500 Internal Server Error' for url 'http://192.168.1.79/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:16:09.585 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.95: Server error '500 Internal Server Error' for url 'http://192.168.1.95/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:16:50.989 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.103: All connection attempts failed
+2026-10-22 16:18:05.217 | INFO     | experimental_campaign:wait_for_redundancy:453 - [attack_legit_restore] Network ready after 121s: Coordinator 192.168.1.95, 7 members, 3/3 Verifiers each
+2026-10-22 16:18:05.218 | INFO     | experimental_campaign:wait_for_ips:142 - Waiting for 7 nodes to come online (timeout: 180s)...
+2026-10-22 16:18:05.228 | INFO     | experimental_campaign:wait_for_ips:150 -    -> Discovered 7/7 nodes...
+2026-10-22 16:18:05.228 | INFO     | experimental_campaign:wait_for_ips:152 - Found all 7 nodes.
+2026-10-22 16:18:05.229 | INFO     | __main__:run_subset:400 - Scenario D (captured Coordinator forces removal)
+2026-10-22 16:18:05.229 | INFO     | experimental_campaign:trigger_reset:110 - Triggering reset with offset=0, count=7...
+2026-10-22 16:18:23.251 | INFO     | experimental_campaign:trigger_reset:113 - Reset triggered.
+2026-10-22 16:18:23.357 | INFO     | experimental_campaign:trigger_deployment:99 - Triggering deployment with offset=0, count=7...
+2026-10-22 16:18:44.382 | INFO     | experimental_campaign:trigger_deployment:102 - Deployment triggered.
+2026-10-22 16:18:44.383 | INFO     | experimental_campaign:wait_for_ips:142 - Waiting for 7 nodes to come online (timeout: 180s)...
+2026-10-22 16:18:44.392 | INFO     | experimental_campaign:wait_for_ips:150 -    -> Discovered 7/7 nodes...
+2026-10-22 16:18:44.392 | INFO     | experimental_campaign:wait_for_ips:152 - Found all 7 nodes.
+2026-10-22 16:18:49.257 | INFO     | experimental_campaign:trigger_start_on_nodes:250 - Triggering /start in 'bootstrap' mode on 7 nodes via proxy...
+2026-10-22 16:18:54.789 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.103: Server error '500 Internal Server Error' for url 'http://192.168.1.103/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:18:54.865 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.110: Server error '500 Internal Server Error' for url 'http://192.168.1.110/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:18:54.966 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.111: Server error '500 Internal Server Error' for url 'http://192.168.1.111/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:18:55.070 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.176: Server error '500 Internal Server Error' for url 'http://192.168.1.176/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:18:55.172 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.59: Server error '500 Internal Server Error' for url 'http://192.168.1.59/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:18:55.269 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.79: Server error '500 Internal Server Error' for url 'http://192.168.1.79/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:18:55.380 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.95: Server error '500 Internal Server Error' for url 'http://192.168.1.95/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:20:50.288 | INFO     | experimental_campaign:wait_for_redundancy:453 - [attack_subset] Network ready after 121s: Coordinator 192.168.1.59, 7 members, 3/3 Verifiers each
+2026-10-22 16:21:00.513 | INFO     | experimental_campaign:trigger_reset:110 - Triggering reset with offset=0, count=7...
+2026-10-22 16:21:20.540 | INFO     | experimental_campaign:trigger_reset:113 - Reset triggered.
+2026-10-22 16:21:20.634 | INFO     | experimental_campaign:trigger_deployment:99 - Triggering deployment with offset=0, count=7...
+2026-10-22 16:21:42.662 | INFO     | experimental_campaign:trigger_deployment:102 - Deployment triggered.
+2026-10-22 16:21:42.663 | INFO     | experimental_campaign:wait_for_ips:142 - Waiting for 7 nodes to come online (timeout: 180s)...
+2026-10-22 16:21:42.673 | INFO     | experimental_campaign:wait_for_ips:150 -    -> Discovered 7/7 nodes...
+2026-10-22 16:21:42.674 | INFO     | experimental_campaign:wait_for_ips:152 - Found all 7 nodes.
+2026-10-22 16:21:49.169 | INFO     | experimental_campaign:trigger_start_on_nodes:250 - Triggering /start in 'bootstrap' mode on 7 nodes via proxy...
+2026-10-22 16:21:54.712 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.103: Server error '500 Internal Server Error' for url 'http://192.168.1.103/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:21:54.787 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.110: Server error '500 Internal Server Error' for url 'http://192.168.1.110/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:21:54.885 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.111: Server error '500 Internal Server Error' for url 'http://192.168.1.111/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:21:54.985 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.176: Server error '500 Internal Server Error' for url 'http://192.168.1.176/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:21:55.087 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.59: Server error '500 Internal Server Error' for url 'http://192.168.1.59/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:21:55.189 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.79: Server error '500 Internal Server Error' for url 'http://192.168.1.79/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:21:55.291 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.95: Server error '500 Internal Server Error' for url 'http://192.168.1.95/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:23:53.271 | INFO     | experimental_campaign:wait_for_redundancy:453 - [attack_D_restore] Network ready after 124s: Coordinator 192.168.1.95, 7 members, 3/3 Verifiers each
+2026-10-22 16:23:53.271 | INFO     | experimental_campaign:wait_for_ips:142 - Waiting for 7 nodes to come online (timeout: 180s)...
+2026-10-22 16:23:53.283 | INFO     | experimental_campaign:wait_for_ips:150 -    -> Discovered 7/7 nodes...
+2026-10-22 16:23:53.283 | INFO     | experimental_campaign:wait_for_ips:152 - Found all 7 nodes.
+2026-10-22 16:24:04.019 | INFO     | experimental_campaign:trigger_reset:110 - Triggering reset with offset=0, count=7...
+2026-10-22 16:24:23.046 | INFO     | experimental_campaign:trigger_reset:113 - Reset triggered.
+2026-10-22 16:24:23.153 | INFO     | experimental_campaign:trigger_deployment:99 - Triggering deployment with offset=0, count=7...
+2026-10-22 16:24:44.177 | INFO     | experimental_campaign:trigger_deployment:102 - Deployment triggered.
+2026-10-22 16:24:44.178 | INFO     | experimental_campaign:wait_for_ips:142 - Waiting for 7 nodes to come online (timeout: 180s)...
+2026-10-22 16:24:44.188 | INFO     | experimental_campaign:wait_for_ips:150 -    -> Discovered 7/7 nodes...
+2026-10-22 16:24:44.188 | INFO     | experimental_campaign:wait_for_ips:152 - Found all 7 nodes.
+2026-10-22 16:24:48.681 | INFO     | experimental_campaign:trigger_start_on_nodes:250 - Triggering /start in 'bootstrap' mode on 7 nodes via proxy...
+2026-10-22 16:24:54.220 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.103: Server error '500 Internal Server Error' for url 'http://192.168.1.103/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:24:54.291 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.110: Server error '500 Internal Server Error' for url 'http://192.168.1.110/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:24:54.391 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.111: Server error '500 Internal Server Error' for url 'http://192.168.1.111/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:24:54.492 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.176: Server error '500 Internal Server Error' for url 'http://192.168.1.176/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:24:54.598 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.59: Server error '500 Internal Server Error' for url 'http://192.168.1.59/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:24:54.697 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.79: Server error '500 Internal Server Error' for url 'http://192.168.1.79/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:24:54.802 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.95: Server error '500 Internal Server Error' for url 'http://192.168.1.95/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:26:48.993 | INFO     | experimental_campaign:wait_for_redundancy:453 - [attack_D_restore] Network ready after 120s: Coordinator 192.168.1.176, 7 members, 3/3 Verifiers each
+2026-10-22 16:26:48.994 | INFO     | experimental_campaign:wait_for_ips:142 - Waiting for 7 nodes to come online (timeout: 180s)...
+2026-10-22 16:26:49.005 | INFO     | experimental_campaign:wait_for_ips:150 -    -> Discovered 7/7 nodes...
+2026-10-22 16:26:49.005 | INFO     | experimental_campaign:wait_for_ips:152 - Found all 7 nodes.
+2026-10-22 16:26:59.154 | INFO     | experimental_campaign:trigger_reset:110 - Triggering reset with offset=0, count=7...
+2026-10-22 16:27:17.176 | INFO     | experimental_campaign:trigger_reset:113 - Reset triggered.
+2026-10-22 16:27:17.314 | INFO     | experimental_campaign:trigger_deployment:99 - Triggering deployment with offset=0, count=7...
+2026-10-22 16:27:39.346 | INFO     | experimental_campaign:trigger_deployment:102 - Deployment triggered.
+2026-10-22 16:27:39.346 | INFO     | experimental_campaign:wait_for_ips:142 - Waiting for 7 nodes to come online (timeout: 180s)...
+2026-10-22 16:27:39.357 | INFO     | experimental_campaign:wait_for_ips:150 -    -> Discovered 7/7 nodes...
+2026-10-22 16:27:39.358 | INFO     | experimental_campaign:wait_for_ips:152 - Found all 7 nodes.
+2026-10-22 16:27:43.164 | INFO     | experimental_campaign:trigger_start_on_nodes:250 - Triggering /start in 'bootstrap' mode on 7 nodes via proxy...
+2026-10-22 16:27:48.724 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.103: Server error '500 Internal Server Error' for url 'http://192.168.1.103/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:27:48.782 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.110: Server error '500 Internal Server Error' for url 'http://192.168.1.110/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:27:48.884 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.111: Server error '500 Internal Server Error' for url 'http://192.168.1.111/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:27:48.986 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.176: Server error '500 Internal Server Error' for url 'http://192.168.1.176/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:27:49.086 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.59: Server error '500 Internal Server Error' for url 'http://192.168.1.59/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:27:49.191 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.79: Server error '500 Internal Server Error' for url 'http://192.168.1.79/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:27:49.293 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.95: Server error '500 Internal Server Error' for url 'http://192.168.1.95/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:29:42.648 | INFO     | experimental_campaign:wait_for_redundancy:453 - [attack_D_restore] Network ready after 119s: Coordinator 192.168.1.176, 7 members, 3/3 Verifiers each
+2026-10-22 16:29:42.648 | INFO     | experimental_campaign:wait_for_ips:142 - Waiting for 7 nodes to come online (timeout: 180s)...
+2026-10-22 16:29:42.659 | INFO     | experimental_campaign:wait_for_ips:150 -    -> Discovered 7/7 nodes...
+2026-10-22 16:29:42.659 | INFO     | experimental_campaign:wait_for_ips:152 - Found all 7 nodes.
+2026-10-22 16:29:52.899 | INFO     | experimental_campaign:trigger_reset:110 - Triggering reset with offset=0, count=7...
+2026-10-22 16:30:10.926 | INFO     | experimental_campaign:trigger_reset:113 - Reset triggered.
+2026-10-22 16:30:11.018 | INFO     | experimental_campaign:trigger_deployment:99 - Triggering deployment with offset=0, count=7...
+2026-10-22 16:30:32.044 | INFO     | experimental_campaign:trigger_deployment:102 - Deployment triggered.
+2026-10-22 16:30:32.045 | INFO     | experimental_campaign:wait_for_ips:142 - Waiting for 7 nodes to come online (timeout: 180s)...
+2026-10-22 16:30:32.055 | INFO     | experimental_campaign:wait_for_ips:150 -    -> Discovered 7/7 nodes...
+2026-10-22 16:30:32.055 | INFO     | experimental_campaign:wait_for_ips:152 - Found all 7 nodes.
+2026-10-22 16:30:39.810 | INFO     | experimental_campaign:trigger_start_on_nodes:250 - Triggering /start in 'bootstrap' mode on 7 nodes via proxy...
+2026-10-22 16:30:45.367 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.103: Server error '500 Internal Server Error' for url 'http://192.168.1.103/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:30:45.425 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.110: Server error '500 Internal Server Error' for url 'http://192.168.1.110/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:30:45.528 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.111: Server error '500 Internal Server Error' for url 'http://192.168.1.111/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:30:45.629 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.176: Server error '500 Internal Server Error' for url 'http://192.168.1.176/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:30:45.728 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.59: Server error '500 Internal Server Error' for url 'http://192.168.1.59/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:30:45.832 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.79: Server error '500 Internal Server Error' for url 'http://192.168.1.79/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:30:45.936 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.95: Server error '500 Internal Server Error' for url 'http://192.168.1.95/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:32:40.839 | INFO     | experimental_campaign:wait_for_redundancy:453 - [attack_D_restore] Network ready after 121s: Coordinator 192.168.1.103, 7 members, 3/3 Verifiers each
+2026-10-22 16:32:40.839 | INFO     | experimental_campaign:wait_for_ips:142 - Waiting for 7 nodes to come online (timeout: 180s)...
+2026-10-22 16:32:40.849 | INFO     | experimental_campaign:wait_for_ips:150 -    -> Discovered 7/7 nodes...
+2026-10-22 16:32:40.849 | INFO     | experimental_campaign:wait_for_ips:152 - Found all 7 nodes.
+2026-10-22 16:32:50.871 | INFO     | experimental_campaign:trigger_reset:110 - Triggering reset with offset=0, count=7...
+2026-10-22 16:33:08.898 | INFO     | experimental_campaign:trigger_reset:113 - Reset triggered.
+2026-10-22 16:33:08.992 | INFO     | experimental_campaign:trigger_deployment:99 - Triggering deployment with offset=0, count=7...
+2026-10-22 16:33:30.021 | INFO     | experimental_campaign:trigger_deployment:102 - Deployment triggered.
+2026-10-22 16:33:30.022 | INFO     | experimental_campaign:wait_for_ips:142 - Waiting for 7 nodes to come online (timeout: 180s)...
+2026-10-22 16:33:30.039 | INFO     | experimental_campaign:wait_for_ips:150 -    -> Discovered 7/7 nodes...
+2026-10-22 16:33:30.039 | INFO     | experimental_campaign:wait_for_ips:152 - Found all 7 nodes.
+2026-10-22 16:33:35.935 | INFO     | experimental_campaign:trigger_start_on_nodes:250 - Triggering /start in 'bootstrap' mode on 7 nodes via proxy...
+2026-10-22 16:33:41.497 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.103: Server error '500 Internal Server Error' for url 'http://192.168.1.103/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:33:41.562 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.110: Server error '500 Internal Server Error' for url 'http://192.168.1.110/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:33:41.659 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.111: Server error '500 Internal Server Error' for url 'http://192.168.1.111/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:33:41.760 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.176: Server error '500 Internal Server Error' for url 'http://192.168.1.176/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:33:41.862 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.59: Server error '500 Internal Server Error' for url 'http://192.168.1.59/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:33:41.963 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.79: Server error '500 Internal Server Error' for url 'http://192.168.1.79/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:33:42.069 | ERROR    | experimental_campaign:send_command_via_proxy:181 - Proxy reported failure for 192.168.1.95: Server error '500 Internal Server Error' for url 'http://192.168.1.95/raft/state'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500
+2026-10-22 16:35:33.440 | INFO     | experimental_campaign:wait_for_redundancy:453 - [attack_D_restore] Network ready after 117s: Coordinator 192.168.1.79, 7 members, 3/3 Verifiers each
+2026-10-22 16:35:33.440 | INFO     | experimental_campaign:wait_for_ips:142 - Waiting for 7 nodes to come online (timeout: 180s)...
+2026-10-22 16:35:33.463 | INFO     | experimental_campaign:wait_for_ips:150 -    -> Discovered 7/7 nodes...
+2026-10-22 16:35:33.464 | INFO     | experimental_campaign:wait_for_ips:152 - Found all 7 nodes.
+2026-10-22 16:35:33.465 | INFO     | __main__:run_subset:420 - Subset done. Results in /home/francesco/attack_fix_check

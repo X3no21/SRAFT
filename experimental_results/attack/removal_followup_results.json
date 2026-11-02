@@ -1,0 +1,90 @@
+{
+  "timestamp": "2026-10-22T14:00:21.942944+00:00",
+  "nodes": 7,
+  "subset": [
+    "legit",
+    "D"
+  ],
+  "image": "build_attack",
+  "scenarios": {
+    "legit_removal": {
+      "section": "removal (functional)",
+      "property": "A legitimately crashed node is removed network-wide and the network heals",
+      "runs": [
+        {
+          "victim": "192.168.1.103",
+          "healed_to_n_minus_1": true,
+          "victim_removed_from_coordinator_view": true,
+          "members_that_removed_victim": 6,
+          "survivors": 6
+        },
+        {
+          "victim": "192.168.1.103",
+          "healed_to_n_minus_1": true,
+          "victim_removed_from_coordinator_view": true,
+          "members_that_removed_victim": 6,
+          "survivors": 6
+        },
+        {
+          "victim": "192.168.1.103",
+          "healed_to_n_minus_1": true,
+          "victim_removed_from_coordinator_view": true,
+          "members_that_removed_victim": 6,
+          "survivors": 6
+        }
+      ]
+    },
+    "D_coordinator_removal": {
+      "section": "5.4",
+      "property": "An unconfirmed removal order leaves honest Verifiers' shards in place",
+      "violation": "an honest Verifier of the target discarded its shard on an unconfirmed order",
+      "runs": [
+        {
+          "coordinator": "192.168.1.59",
+          "target": "192.168.1.103",
+          "recipients": 5,
+          "kept_target": 5,
+          "removed_target": 0,
+          "membership_diverged": false,
+          "target_still_authenticates": true
+        },
+        {
+          "coordinator": "192.168.1.95",
+          "target": "192.168.1.103",
+          "recipients": 5,
+          "kept_target": 5,
+          "removed_target": 0,
+          "membership_diverged": false,
+          "target_still_authenticates": true
+        },
+        {
+          "coordinator": "192.168.1.176",
+          "target": "192.168.1.103",
+          "recipients": 5,
+          "kept_target": 5,
+          "removed_target": 0,
+          "membership_diverged": false,
+          "target_still_authenticates": true
+        },
+        {
+          "coordinator": "192.168.1.176",
+          "target": "192.168.1.103",
+          "recipients": 5,
+          "kept_target": 5,
+          "removed_target": 0,
+          "membership_diverged": false,
+          "target_still_authenticates": true
+        },
+        {
+          "coordinator": "192.168.1.103",
+          "target": "192.168.1.110",
+          "recipients": 5,
+          "kept_target": 5,
+          "removed_target": 0,
+          "membership_diverged": false,
+          "target_still_authenticates": true
+        }
+      ]
+    }
+  }
+}

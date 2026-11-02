@@ -21,7 +21,7 @@ from typing import List, Optional, Dict, Any
 from loguru import logger
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-FIRMWARE_DIR = "/home/raspberrypi5/firmware"
+FIRMWARE_DIR = "/home/pi/firmware"
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 
 COMMAND_QUEUE = Queue()

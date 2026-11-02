@@ -28,6 +28,11 @@
 #define MSG_VOTE_GRANTED "VG"       // VoteGranted: VG <term> <voter_ip>
 #define MSG_VOTE_DENIED "VD"        // VoteDenied:  VD <term> <voter_ip>
 #define MSG_HEARTBEAT "HB"          // Heartbeat:   HB <term> <leader_ip> <leader_mac>
+// Excluded devices. The list is permanent: it is stored in non-volatile memory and never shrinks.
+#define MAX_BLACKLIST 32
+#define MAX_COUNTED_VOTERS 64                               // Distinct voters a candidate can count in one term.
+// BlacklistAdd: BL_ADD|<mac>|<nonce>, sent by the Coordinator to the other devices.
+#define MSG_BLACKLIST_ADD "BL_ADD"
 #define MSG_LEADER_ANNOUNCE "LI"    // LeaderIs:    LI <term> <leader_ip> <leader_mac>
 
 #define MAC_ADDR_STR_LEN 18 // "XX:XX:XX:XX:XX:XX\0"
@@ -43,6 +48,8 @@ typedef struct {
     uint32_t current_term;
     char voted_for[INET_ADDRSTRLEN];
     int vote_count;
+    uint32_t voter_addrs[MAX_COUNTED_VOTERS];               // Voters already counted in the current term.
+    int voter_count;
     uint32_t last_log_index;
     uint32_t last_log_term;
     char my_ip[INET_ADDRSTRLEN];
@@ -54,7 +61,7 @@ typedef struct {
     TimerHandle_t heartbeat_timer;
     TimerHandle_t election_timer;
     uint32_t current_election_timeout_ms;
-    char blacklisted_macs[10][MAC_ADDR_STR_LEN];
+    char blacklisted_macs[MAX_BLACKLIST][MAC_ADDR_STR_LEN];
     int blacklist_count;
     TickType_t last_heartbeat_received_at;
 } raft_node_t;
@@ -191,6 +198,11 @@ void raft_state_get_self_info(char* my_ip_buf, size_t ip_buf_size, char* my_mac_
 char** raft_state_get_peers_copy(int* peer_count);
 
 /**
+ * @brief Number of devices known to Raft, including this one (0 before Raft is initialized).
+ */
+int raft_state_get_peer_count(void);
+
+/**
  * @brief Atomically handles a RequestVote RPC.
  * @details This function contains the core logic for deciding whether to grant a vote,
  * including a check against the MAC address blacklist. It strictly follows RAFT rules.
@@ -208,7 +220,9 @@ bool raft_state_handle_request_vote(uint32_t rpc_term, const char* rpc_candidate
  * @brief Atomically handles a Heartbeat or LeaderAnnounce RPC.
  * @details If the message's term is valid, it updates the node's state to FOLLOWER,
  * records the leader's identity, and resets the heartbeat timer. It also cancels
- * any ongoing voting grace period.
+ * any ongoing voting grace period. A Coordinator that is new for this node is accepted only if
+ * the node voted for it in that term, after attesting it, or if it passes an integrity check,
+ * run once per Coordinator and term. The caller ensures that the sender is the declared Coordinator.
  * @param rpc_term The term from the incoming RPC.
  * @param rpc_leader_ip The IP of the leader sending the message.
  * @param rpc_leader_mac The MAC address of the leader sending the message.
@@ -217,10 +231,12 @@ bool raft_state_handle_request_vote(uint32_t rpc_term, const char* rpc_candidate
 void raft_state_handle_heartbeat(uint32_t rpc_term, const char* rpc_leader_ip, const char* rpc_leader_mac);
 
 /**
- * @brief Atomically increments the vote count for the current node.
- * @return The new vote count after incrementing.
+ * @brief Atomically counts the vote of a voter for the current node.
+ * @details A voter is counted once per term, however many votes it sends.
+ * @param voter_ip The IP address of the voter, which is the sender of the vote.
+ * @return The new vote count, or -1 if the vote of this voter was already counted.
  */
-int raft_state_increment_vote_count(void);
+int raft_state_record_vote(const char *voter_ip);
 
 /**
  * @brief Gets the current vote count for a candidate node.
@@ -249,7 +265,23 @@ void raft_state_get_log_info(uint32_t* last_log_index, uint32_t* last_log_term);
  * @param mac_to_blacklist The null-terminated MAC address string to add.
  * @return void
  */
-void raft_state_blacklist_mac(const char* mac_to_blacklist);
+bool raft_state_blacklist_mac(const char* mac_to_blacklist);
+
+/**
+ * @brief Tells whether a MAC address is in the list of excluded devices.
+ */
+bool raft_state_is_blacklisted(const char* mac);
+
+/**
+ * @brief Copies the list of excluded devices.
+ * @return The number of entries copied.
+ */
+int raft_state_get_blacklist(char macs[][MAC_ADDR_STR_LEN], int max_entries);
+
+/**
+ * @brief Erases the list of excluded devices, in memory and in non-volatile storage. For tests only.
+ */
+void raft_state_clear_blacklist(void);
 
 /**
  * @brief Atomically increases the election timeout for exponential backoff.

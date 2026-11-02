@@ -4,6 +4,7 @@
  * ============================= */
 
 #include "auth_join.h"
+#include "hatt_protocol.h"
 #include "rest_api.h"
 #include "discovery.h"
 #include "connection_pool.h"
@@ -28,11 +29,102 @@
 #include <lwip/sockets.h>
 #include <lwip/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <cJSON.h>
 
 static const char *TAG = "AUTH_JOIN";
 
 static char legitimate_verifier_ips[MAX_VERIFIERS][INET_ADDRSTRLEN];
+
+#define MAX_PENDING_ENROLLMENTS 32
+#define PENDING_ENROLLMENT_TTL_MS 120000
+
+// (Prover) Challenges answered in an enrollment that is not committed yet, per Verifier.
+static struct {
+    bool in_use;
+    char verifier_ip[INET_ADDRSTRLEN];
+    char challenge[64];
+    TickType_t created;
+} pending_challenges[MAX_PENDING_ENROLLMENTS];
+
+// (Verifier) Enrollments whose responses must arrive encrypted.
+static struct {
+    bool in_use;
+    uint32_t transaction_id;
+    char target_ip[INET_ADDRSTRLEN];
+    TickType_t created;
+} secure_enrollments[MAX_PENDING_ENROLLMENTS];
+
+static portMUX_TYPE pending_enrollment_spinlock = portMUX_INITIALIZER_UNLOCKED;
+
+static void remember_pending_challenge(const char *verifier_ip, const char *challenge) {
+    taskENTER_CRITICAL(&pending_enrollment_spinlock);
+    TickType_t now = xTaskGetTickCount();
+    int slot = 0;
+    for (int i = 0; i < MAX_PENDING_ENROLLMENTS; i++) {
+        if (!pending_challenges[i].in_use || (now - pending_challenges[i].created) * portTICK_PERIOD_MS > PENDING_ENROLLMENT_TTL_MS ||
+            strcmp(pending_challenges[i].verifier_ip, verifier_ip) == 0) {
+            slot = i;
+            break;
+        }
+        if (pending_challenges[i].created < pending_challenges[slot].created) slot = i;
+    }
+    pending_challenges[slot].in_use = true;
+    strncpy(pending_challenges[slot].verifier_ip, verifier_ip, INET_ADDRSTRLEN - 1);
+    pending_challenges[slot].verifier_ip[INET_ADDRSTRLEN - 1] = '\0';
+    strncpy(pending_challenges[slot].challenge, challenge, sizeof(pending_challenges[slot].challenge) - 1);
+    pending_challenges[slot].challenge[sizeof(pending_challenges[slot].challenge) - 1] = '\0';
+    pending_challenges[slot].created = now;
+    taskEXIT_CRITICAL(&pending_enrollment_spinlock);
+}
+
+bool join_is_pending_challenge(const char *verifier_ip, const char *challenge) {
+    bool found = false;
+    taskENTER_CRITICAL(&pending_enrollment_spinlock);
+    TickType_t now = xTaskGetTickCount();
+    for (int i = 0; i < MAX_PENDING_ENROLLMENTS && !found; i++) {
+        found = pending_challenges[i].in_use && (now - pending_challenges[i].created) * portTICK_PERIOD_MS <= PENDING_ENROLLMENT_TTL_MS &&
+                strcmp(pending_challenges[i].verifier_ip, verifier_ip) == 0 && strcmp(pending_challenges[i].challenge, challenge) == 0;
+    }
+    taskEXIT_CRITICAL(&pending_enrollment_spinlock);
+    return found;
+}
+
+static void expect_secure_enrollment(uint32_t transaction_id, const char *target_ip) {
+    taskENTER_CRITICAL(&pending_enrollment_spinlock);
+    TickType_t now = xTaskGetTickCount();
+    int slot = 0;
+    for (int i = 0; i < MAX_PENDING_ENROLLMENTS; i++) {
+        if (!secure_enrollments[i].in_use || (now - secure_enrollments[i].created) * portTICK_PERIOD_MS > PENDING_ENROLLMENT_TTL_MS) {
+            slot = i;
+            break;
+        }
+        if (secure_enrollments[i].created < secure_enrollments[slot].created) slot = i;
+    }
+    secure_enrollments[slot].in_use = true;
+    secure_enrollments[slot].transaction_id = transaction_id;
+    strncpy(secure_enrollments[slot].target_ip, target_ip, INET_ADDRSTRLEN - 1);
+    secure_enrollments[slot].target_ip[INET_ADDRSTRLEN - 1] = '\0';
+    secure_enrollments[slot].created = now;
+    taskEXIT_CRITICAL(&pending_enrollment_spinlock);
+}
+
+/**
+ * @brief (Verifier) Tells whether the responses of an enrollment must arrive encrypted, and forgets it.
+ */
+static bool take_secure_enrollment(uint32_t transaction_id, const char *target_ip) {
+    bool found = false;
+    taskENTER_CRITICAL(&pending_enrollment_spinlock);
+    for (int i = 0; i < MAX_PENDING_ENROLLMENTS && !found; i++) {
+        if (secure_enrollments[i].in_use && secure_enrollments[i].transaction_id == transaction_id &&
+            strcmp(secure_enrollments[i].target_ip, target_ip) == 0) {
+            secure_enrollments[i].in_use = false;
+            found = true;
+        }
+    }
+    taskEXIT_CRITICAL(&pending_enrollment_spinlock);
+    return found;
+}
 static int legitimate_verifier_count = 0;
 static SemaphoreHandle_t new_node_state_mutex = NULL;
 
@@ -90,7 +182,6 @@ static void join_watchdog_task(void *pvParameters);
 static bool is_ip_in_verifier_list(JoinProcess* job, const char *ip);
 void master_assign_new_verifiers(JoinProcess* job, const char *target_ip, int num_to_add, uint32_t transaction_id);
 void node_master_handle_join_request(const char *target_ip, join_request_type_t type, join_request_t request);
-static char *merge_cnode_json(const char *base_json, const char *delta_json);
 static void master_finalize_and_commit_join(JoinProcess* job);
 void finalize_join_process(JoinProcess* job, bool is_success);
 static void leader_finalize_commit(JoinProcess* job);
@@ -182,6 +273,58 @@ static void master_trigger_join_rollback(JoinProcess* job) {
 }
 
 /**
+ * @brief (Leader-only) Records when the majority of the members acknowledged a commit.
+ * @details The members asked are the other ones, so with the Coordinator the majority is reached at
+ * (expected + 1) / 2 acknowledgements, as for a removal.
+ */
+static void note_commit_majority(JoinProcess *job) {
+    if (job->commit_majority_ms == 0 && job->expected_commit_acks > 0 &&
+        job->commit_ack_count >= (job->expected_commit_acks + 1) / 2) {
+        job->commit_majority_ms = (xTaskGetTickCount() * portTICK_PERIOD_MS) | 1;
+    }
+}
+
+static bool commit_grace_expired(const JoinProcess *job) {
+    return job->in_use && job->expected_commit_acks > 0 && job->commit_ack_count < job->expected_commit_acks &&
+           job->commit_majority_ms != 0 &&
+           (xTaskGetTickCount() * portTICK_PERIOD_MS) - job->commit_majority_ms >= COMMIT_ACK_GRACE_MS;
+}
+
+/* Network state received by a joining device in NET_STATE parts, kept until the next join. */
+static struct {
+    uint32_t tid;
+    int parts;
+    int received;
+    char *buf;
+    size_t len;
+} net_state = {0};
+
+static void net_state_add(uint32_t tid, int part, int parts, const char *data) {
+    if (part == 0 || tid != net_state.tid) {
+        free(net_state.buf);
+        memset(&net_state, 0, sizeof(net_state));
+        net_state.tid = tid;
+        net_state.parts = parts;
+    }
+    if (part != net_state.received || parts != net_state.parts || parts <= 0) {
+        ESP_LOGE(TAG, "[JoinID: %lu] Network state part %d/%d out of order.", tid, part, parts);
+        net_state.received = -1;
+        return;
+    }
+    size_t n = strlen(data);
+    char *grown = realloc(net_state.buf, net_state.len + n + 1);
+    if (!grown) { net_state.received = -1; return; }
+    net_state.buf = grown;
+    memcpy(net_state.buf + net_state.len, data, n + 1);
+    net_state.len += n;
+    net_state.received++;
+}
+
+static bool net_state_complete(uint32_t tid) {
+    return net_state.buf && net_state.tid == tid && net_state.parts > 0 && net_state.received == net_state.parts;
+}
+
+/**
  * @brief A watchdog task that monitors the join process for timeouts.
  * @details This task waits on a semaphore that is given when a join process starts.
  * If the join does not complete within the `JOIN_PROCESS_TIMEOUT_MS`, this task
@@ -194,8 +337,36 @@ static void join_watchdog_task(void *pvParameters) {
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(5000));
         
-        JoinProcess job_to_roll_back_join;
         bool needs_rollback_join = false;
+
+        // Commits acknowledged by the majority are completed without waiting for the members that do not answer.
+        bool finalize_join = false;
+        TAKE_JOIN_MUTEX(__FUNCTION__);
+        if (commit_grace_expired(&pending_join)) {
+            ESP_LOGW(TAG, "[JoinID: %lu] Commit acknowledged by %d of %d members: completing the join of %s.",
+                     pending_join.transaction_id, pending_join.commit_ack_count, pending_join.expected_commit_acks, pending_join.new_node_ip);
+            pending_join.expected_commit_acks = pending_join.commit_ack_count;
+            db_insert_node(pending_join.new_node_ip, pending_join.new_node_ip);
+            raft_state_add_peer(pending_join.new_node_ip);
+            finalize_join = true;
+        }
+        GIVE_JOIN_MUTEX(__FUNCTION__);
+        if (finalize_join) leader_finalize_commit(&pending_join);
+
+        int heal_to_finalize[MAX_PARALLEL_HEALS];
+        int heals_to_finalize = 0;
+        xSemaphoreTake(heal_pool_mutex, portMAX_DELAY);
+        for (int i = 0; i < MAX_PARALLEL_HEALS; i++) {
+            JoinProcess* job = &pending_heal_jobs[i];
+            if (commit_grace_expired(job)) {
+                ESP_LOGW(TAG, "[JoinID: %lu] Commit acknowledged by %d of %d members: completing the heal of %s.",
+                         job->transaction_id, job->commit_ack_count, job->expected_commit_acks, job->new_node_ip);
+                job->expected_commit_acks = job->commit_ack_count;
+                heal_to_finalize[heals_to_finalize++] = i;
+            }
+        }
+        xSemaphoreGive(heal_pool_mutex);
+        for (int k = 0; k < heals_to_finalize; k++) leader_finalize_commit(&pending_heal_jobs[heal_to_finalize[k]]);
 
         TAKE_JOIN_MUTEX(__FUNCTION__);
         if (pending_join.in_use) {
@@ -203,14 +374,14 @@ static void join_watchdog_task(void *pvParameters) {
             if (elapsed_time_ms > JOIN_PROCESS_TIMEOUT_MS) {
                 ESP_LOGE(TAG, "[JoinID: %lu] Sequential Join process for node %s timed out. Staging rollback.",
                          pending_join.transaction_id, pending_join.new_node_ip);
-                memcpy(&job_to_roll_back_join, &pending_join, sizeof(JoinProcess));
                 needs_rollback_join = true;
             }
         }
         GIVE_JOIN_MUTEX(__FUNCTION__);
 
+        // The job itself is rolled back, not a copy: the rollback releases its semaphore and clears it.
         if (needs_rollback_join) {
-            master_trigger_join_rollback(&job_to_roll_back_join);
+            master_trigger_join_rollback(&pending_join);
         }
 
         xSemaphoreTake(heal_pool_mutex, portMAX_DELAY);
@@ -394,6 +565,107 @@ static bool is_ip_in_verifier_list(JoinProcess* job, const char *ip) {
  * @param num_to_add The number of verifiers to assign.
  * @param transaction_id The unique ID for the current join process.
  */
+/**
+ * @brief (Leader-only) Picks a response index of a device that was never assigned before.
+ * @details Every challenge addresses its own group of cells of the device, so an index must be
+ * used at most once: it is rejected if it appears in the network state, including the challenges
+ * of removed Verifiers, which are kept as revoked, or among those drawn in the current operation.
+ * @param target_ip The device the challenge is for.
+ * @param already_drawn Comma-separated challenges drawn so far for the same Verifier.
+ * @param challenge Output buffer for the challenge string.
+ * @param challenge_size The size of the output buffer.
+ * @return true if an unused index was found.
+ */
+static bool allocate_puf_challenge(const char *target_ip, const char *already_drawn, char *challenge, size_t challenge_size) {
+    int start = esp_random() % PUF_RESPONSE_CAPACITY;
+    for (int i = 0; i < PUF_RESPONSE_CAPACITY; i++) {
+        puf_format_challenge((start + i) % PUF_RESPONSE_CAPACITY, target_ip, challenge, challenge_size);
+
+        bool drawn = false;
+        size_t len = strlen(challenge);
+        for (const char *p = strstr(already_drawn, challenge); p != NULL && !drawn; p = strstr(p + 1, challenge)) {
+            drawn = (p == already_drawn || p[-1] == ',') && (p[len] == ',' || p[len] == '\0');
+        }
+
+        if (!drawn && !db_challenge_exists_globally(challenge)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * @brief (Leader-only) Checks that a device answers before it is given a role in an enrollment.
+ * @details A device that has failed may still be listed as a member until its removal, and also its TCP
+ * connection may look open for a while, since a device that loses power sends nothing. A connection
+ * attempt to its attestation port, which every member keeps open, tells within a short time whether it
+ * is reachable, so that a heal is not stalled by a Verifier or intermediary that cannot answer.
+ */
+bool auth_join_device_reachable(const char *ip) {
+    struct sockaddr_in addr = { .sin_family = AF_INET, .sin_port = htons(HATT_PORT) };
+    if (inet_pton(AF_INET, ip, &addr.sin_addr) != 1) return false;
+    int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+    if (sock < 0) return false;
+    int flags = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+    bool reachable = false;
+    int rc = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
+    if (rc == 0) {
+        reachable = true;
+    } else if (errno == EINPROGRESS) {
+        fd_set write_fds;
+        FD_ZERO(&write_fds);
+        FD_SET(sock, &write_fds);
+        struct timeval tv = { .tv_sec = DEVICE_PROBE_TIMEOUT_MS / 1000, .tv_usec = (DEVICE_PROBE_TIMEOUT_MS % 1000) * 1000 };
+        if (select(sock + 1, NULL, &write_fds, NULL, &tv) > 0) {
+            int err = 0;
+            socklen_t len = sizeof(err);
+            reachable = getsockopt(sock, SOL_SOCKET, SO_ERROR, &err, &len) == 0 && err == 0;
+        }
+    }
+    struct linger lg = { .l_onoff = 1, .l_linger = 0 };
+    setsockopt(sock, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg));
+    close(sock);
+    if (!reachable) ESP_LOGW(TAG, "Device %s does not answer: it is not given a role in this enrollment.", ip);
+    return reachable;
+}
+
+/**
+ * @brief (Leader-only) Finds a device that can give a Prover and a candidate Verifier the key of an enrollment.
+ * @details The intermediary must hold CRPs of the candidate Verifier and either be the Prover
+ * itself or hold CRPs of the Prover as well, so that it shares a PUF-keyed channel with both.
+ * @param target_ip The Prover.
+ * @param candidate_ip The candidate Verifier.
+ * @param target_verifiers The current Verifiers of the Prover.
+ * @param broker_ip Output buffer for the intermediary.
+ * @return true if an intermediary exists.
+ */
+static bool find_enrollment_broker(const char *target_ip, const char *candidate_ip, char target_verifiers[][INET_ADDRSTRLEN],
+                                   int target_verifier_count, char *broker_ip) {
+    char (*candidate_verifiers)[INET_ADDRSTRLEN] = malloc(MAX_VERIFIERS * INET_ADDRSTRLEN);
+    if (!candidate_verifiers) return false;
+
+    bool found = false;
+    int candidate_verifier_count = db_get_verifiers_for_node(candidate_ip, candidate_verifiers, MAX_VERIFIERS);
+    for (int i = 0; i < candidate_verifier_count && !found; i++) {
+        if (strcmp(candidate_verifiers[i], target_ip) == 0) {
+            found = true;
+        }
+        for (int j = 0; j < target_verifier_count && !found; j++) {
+            found = strcmp(candidate_verifiers[i], target_verifiers[j]) == 0;
+        }
+        if (found && !auth_join_device_reachable(candidate_verifiers[i])) {
+            found = false;
+        }
+        if (found) {
+            strncpy(broker_ip, candidate_verifiers[i], INET_ADDRSTRLEN - 1);
+            broker_ip[INET_ADDRSTRLEN - 1] = '\0';
+        }
+    }
+    free(candidate_verifiers);
+    return found;
+}
+
 void master_assign_new_verifiers(JoinProcess* job, const char *target_ip, int num_to_add, uint32_t transaction_id) {
     if (num_to_add <= 0) {
         finalize_join_process(job, true);
@@ -421,15 +693,34 @@ void master_assign_new_verifiers(JoinProcess* job, const char *target_ip, int nu
     memset(verifier_list_str, 0, 1024);
 
     char selected_followers[MAX_VERIFIERS][INET_ADDRSTRLEN];
+    char selected_brokers[MAX_VERIFIERS][INET_ADDRSTRLEN];
     int selected_count = 0;
     char *string_buffer_position = verifier_list_str;
     size_t remaining_buffer_space = 1024;
+    memset(selected_brokers, 0, sizeof(selected_brokers));
 
-    if (follower_count > 0) {
+    // A device that is already a member is enrolled at a new Verifier through an intermediary that
+    // shares a PUF-keyed channel with both. The first pass accepts only candidates for which one
+    // exists; the second pass completes the selection as in the first enrollment of a device.
+    int selection_passes = (job->type == JOIN_TYPE_HEAL_NODE) ? 2 : 1;
+    for (int pass = 0; pass < selection_passes && follower_count > 0; pass++) {
+        bool require_broker = (job->type == JOIN_TYPE_HEAL_NODE) && pass == 0;
         int attempts = 0;
         while (selected_count < num_to_add && attempts < (follower_count * 2)) {
             char follower_ip_buffer[INET_ADDRSTRLEN];
             if (db_get_random_follower_ip(follower_ip_buffer, sizeof(follower_ip_buffer))) {
+                char candidate_broker[INET_ADDRSTRLEN] = {0};
+                if (strcmp(follower_ip_buffer, target_ip) == 0 ||
+                    (require_broker && !find_enrollment_broker(target_ip, follower_ip_buffer, existing_verifiers, existing_verifiers_count, candidate_broker))) {
+                    attempts++;
+                    continue;
+                }
+
+                if (job->type == JOIN_TYPE_HEAL_NODE && !auth_join_device_reachable(follower_ip_buffer)) {
+                    attempts++;
+                    continue;
+                }
+
                 bool already_a_verifier = false;
                 for (int j = 0; j < existing_verifiers_count; j++) {
                     if (strcmp(existing_verifiers[j], follower_ip_buffer) == 0) {
@@ -453,6 +744,7 @@ void master_assign_new_verifiers(JoinProcess* job, const char *target_ip, int nu
                 if (!already_selected_this_round) {
                     strncpy(selected_followers[selected_count], follower_ip_buffer, INET_ADDRSTRLEN - 1);
                     selected_followers[selected_count][INET_ADDRSTRLEN - 1] = '\0';
+                    strncpy(selected_brokers[selected_count], candidate_broker, INET_ADDRSTRLEN - 1);
                     
                     const char *separator = (selected_count > 0) ? "," : "";
                     int chars_written = snprintf(string_buffer_position, remaining_buffer_space, "%s%s", separator, follower_ip_buffer);
@@ -486,12 +778,17 @@ void master_assign_new_verifiers(JoinProcess* job, const char *target_ip, int nu
         for (int i = 0; i < selected_count; i++) {
             strncpy(job->verifier_ips[job->verifier_count], selected_followers[i], INET_ADDRSTRLEN - 1);
             job->verifier_ips[job->verifier_count][INET_ADDRSTRLEN - 1] = '\0';
+            job->broker_addrs[job->verifier_count] = 0;
+            if (selected_brokers[i][0] != '\0') {
+                inet_pton(AF_INET, selected_brokers[i], &job->broker_addrs[job->verifier_count]);
+            }
             job->verifier_count++;
         }
     } else {
         ESP_LOGW(TAG, "[JoinID: %lu] No followers found. Bootstrapping with self as the only verifier.", transaction_id);
         job->verifier_count = 1;
         strncpy(job->verifier_ips[0], my_ip, INET_ADDRSTRLEN - 1);
+        job->broker_addrs[0] = 0;
         strncpy(verifier_list_str, my_ip, 1023);
     }
 
@@ -510,6 +807,8 @@ void master_assign_new_verifiers(JoinProcess* job, const char *target_ip, int nu
     job->expected_verifier_results = job->verifier_count;
     job->received_verifier_results = 0;
     job->failed_verifier_results = 0;
+    job->wrong_proof_results = 0;
+    job->reported_verifiers_mask = 0;
 
     if (correct_mutex) {
         xSemaphoreGive(correct_mutex);
@@ -564,44 +863,81 @@ void master_assign_new_verifiers(JoinProcess* job, const char *target_ip, int nu
     ESP_LOGI(TAG, "[JoinID: %lu] Sending challenge requests to all %d verifiers.", transaction_id, job->verifier_count);
 
 
+    // Challenges drawn in this operation for all the verifiers, so that none is assigned twice.
+    const size_t drawn_size = 4096;
+    char *drawn_in_operation = calloc(1, drawn_size);
+    if (!drawn_in_operation) {
+        ESP_LOGE(TAG, "[JoinID: %lu] Failed to allocate memory for the challenge list.", transaction_id);
+        finalize_join_process(job, false);
+        return;
+    }
+
     for (int i = 0; i < job->verifier_count; i++) {
         const char* current_verifier_ip = job->verifier_ips[i];
-        int num_challenges_for_verifier = (esp_random() % MAX_CHALLENGES_PER_VERIFIER) + 1;
+        int num_challenges_for_verifier = CRPS_PER_VERIFIER;
 
         char challenges_list_str[1024] = {0};
         char *ptr = challenges_list_str;
         size_t remaining = sizeof(challenges_list_str);
 
+        int drawn_for_verifier = 0;
         for (int k = 0; k < num_challenges_for_verifier; k++) {
             char challenge[64];
-            int attempts = 0;
-            do {
-                uint32_t random_part = esp_random();
-                snprintf(challenge, sizeof(challenge), "CHL_%lu_%lu_%d", transaction_id, random_part, k);
-                attempts++;
-            } while (db_challenge_exists_globally(challenge) && attempts < 10);
-
-            if (attempts >= 10) {
-                ESP_LOGW(TAG, "Could not generate unique challenge after 10 attempts. Using last generated.");
+            if (!allocate_puf_challenge(target_ip, drawn_in_operation, challenge, sizeof(challenge))) {
+                ESP_LOGE(TAG, "[JoinID: %lu] No unused response index left for %s.", transaction_id, target_ip);
+                break;
             }
+
+            size_t drawn_len = strlen(drawn_in_operation);
+            snprintf(drawn_in_operation + drawn_len, drawn_size - drawn_len, "%s%s", (drawn_len > 0) ? "," : "", challenge);
 
             int written = snprintf(ptr, remaining, "%s%s", (k > 0) ? "," : "", challenge);
             if (written > 0 && written < remaining) {
                 ptr += written;
                 remaining -= written;
             }
+            drawn_for_verifier++;
         }
+        num_challenges_for_verifier = drawn_for_verifier;
 
         char nonce_hex_req[NONCE_HEX_SIZE];
         uint8_t nonce_req[NONCE_SIZE];
         generate_nonce(nonce_req, NONCE_SIZE);
         bytes_to_hex(nonce_req, nonce_hex_req, NONCE_SIZE);
 
-        int req_msg_size = snprintf(NULL, 0, "%s:%lu:%s:%d:%s:%s\n", MSG_REQ_CHL_GEN, transaction_id, target_ip, num_challenges_for_verifier, challenges_list_str, nonce_hex_req);
+        char broker_buf[INET_ADDRSTRLEN];
+        const char *broker_ip = ENROLL_NO_BROKER;
+        if (job->broker_addrs[i] != 0 && inet_ntop(AF_INET, &job->broker_addrs[i], broker_buf, sizeof(broker_buf))) {
+            broker_ip = broker_buf;
+        }
+        if (strcmp(broker_ip, ENROLL_NO_BROKER) != 0) {
+            // The intermediary gives the Prover and this Verifier the key that protects the responses.
+            if (strcmp(broker_ip, my_ip) == 0) {
+                if (!auth_puf_broker_enrollment(transaction_id, target_ip, current_verifier_ip)) {
+                    ESP_LOGE(TAG, "[JoinID: %lu] Could not deliver the enrollment key for %s and %s.", transaction_id, target_ip, current_verifier_ip);
+                }
+            } else {
+                char nonce_hex_broker[NONCE_HEX_SIZE];
+                uint8_t nonce_broker[NONCE_SIZE];
+                generate_nonce(nonce_broker, NONCE_SIZE);
+                bytes_to_hex(nonce_broker, nonce_hex_broker, NONCE_SIZE);
+
+                char broker_msg[160];
+                snprintf(broker_msg, sizeof(broker_msg), "%s:%lu:%s:%s:%s\n", MSG_BROKER_REQ, transaction_id, target_ip, current_verifier_ip, nonce_hex_broker);
+                connection_pool_send(broker_ip, broker_msg);
+            }
+        } else if (job->type == JOIN_TYPE_HEAL_NODE) {
+            ESP_LOGW(TAG, "[JoinID: %lu] No intermediary shares a channel with %s and %s: enrolling as in a first enrollment.", transaction_id, target_ip, current_verifier_ip);
+            char unprotected_event[96];
+            snprintf(unprotected_event, sizeof(unprotected_event), "HEAL_UNPROTECTED:%s:%s", target_ip, current_verifier_ip);
+            send_monitoring_tcp_event(unprotected_event);
+        }
+
+        int req_msg_size = snprintf(NULL, 0, "%s:%lu:%s:%d:%s:%s:%s\n", MSG_REQ_CHL_GEN, transaction_id, target_ip, num_challenges_for_verifier, challenges_list_str, broker_ip, nonce_hex_req);
         if (req_msg_size > 0) {
             char *req_msg = malloc(req_msg_size + 1);
             if (req_msg) {
-                snprintf(req_msg, req_msg_size + 1, "%s:%lu:%s:%d:%s:%s\n", MSG_REQ_CHL_GEN, transaction_id, target_ip, num_challenges_for_verifier, challenges_list_str, nonce_hex_req);
+                snprintf(req_msg, req_msg_size + 1, "%s:%lu:%s:%d:%s:%s:%s\n", MSG_REQ_CHL_GEN, transaction_id, target_ip, num_challenges_for_verifier, challenges_list_str, broker_ip, nonce_hex_req);
                 ESP_LOGI(TAG, "[JoinID: %lu] Sending %d pre-generated challenges to verifier %s", transaction_id, num_challenges_for_verifier, current_verifier_ip);
                 connection_pool_send(current_verifier_ip, req_msg);
                 free(req_msg);
@@ -610,6 +946,7 @@ void master_assign_new_verifiers(JoinProcess* job, const char *target_ip, int nu
             }
         }
     }
+    free(drawn_in_operation);
 
     if (job->type == JOIN_TYPE_HEAL_NODE) {
         uint8_t nonce_delegate[NONCE_SIZE];
@@ -691,6 +1028,28 @@ void node_master_handle_join_request(const char *target_ip, join_request_type_t 
                 free(event_msg);
             }
 
+            xSemaphoreGive(worker_sync_sem);
+            return;
+        }
+
+        if (raft_state_is_blacklisted(actual_mac)) {
+            // A device that failed an integrity check is excluded for good.
+            ESP_LOGE(TAG, "Join request from excluded device %s (MAC: %s). Rejecting join.", effective_target_ip, actual_mac);
+            char nonce_hex_excl[NONCE_HEX_SIZE];
+            uint8_t nonce_excl[NONCE_SIZE];
+            generate_nonce(nonce_excl, NONCE_SIZE);
+            bytes_to_hex(nonce_excl, nonce_hex_excl, NONCE_SIZE);
+
+            char excl_msg[128];
+            snprintf(excl_msg, sizeof(excl_msg), "%s:0:0:%s\n", MSG_JOIN_FINALIZE, nonce_hex_excl);
+            connection_pool_send(effective_target_ip, excl_msg);
+
+            char *excl_event = malloc(MAX_MESSAGE_SIZE);
+            if (excl_event) {
+                snprintf(excl_event, MAX_MESSAGE_SIZE, "JOIN_FAILED_BLACKLISTED:%s", effective_target_ip);
+                send_monitoring_tcp_event(excl_event);
+                free(excl_event);
+            }
             xSemaphoreGive(worker_sync_sem);
             return;
         }
@@ -793,49 +1152,6 @@ void node_master_handle_join_request(const char *target_ip, join_request_type_t 
 }
 
 /**
- * @brief (Leader-only) Merges two CNode JSON array strings into a single one.
- * @param base_json A string containing the base JSON array.
- * @param delta_json A string containing the new items to add.
- * @return A dynamically allocated string with the merged JSON. The caller must free this string. Returns NULL on failure.
- */
-static char *merge_cnode_json(const char *base_json, const char *delta_json) {
-    if (!base_json && !delta_json)
-        return NULL;
-    if (!delta_json)
-        return strdup(base_json);
-    if (!base_json)
-        return strdup(delta_json);
-
-    cJSON *base_array = cJSON_Parse(base_json);
-    if (!cJSON_IsArray(base_array)) {
-        if (base_array)
-            cJSON_Delete(base_array);
-        base_array = cJSON_CreateArray();
-    }
-
-    cJSON *delta_array = cJSON_Parse(delta_json);
-    if (!cJSON_IsArray(delta_array)) {
-        if (delta_array)
-            cJSON_Delete(delta_array);
-        char *result = cJSON_PrintUnformatted(base_array);
-        cJSON_Delete(base_array);
-        return result;
-    }
-
-    cJSON *item_to_move;
-    while ((item_to_move = cJSON_DetachItemFromArray(delta_array, 0))) {
-        cJSON_AddItemToArray(base_array, item_to_move);
-    }
-
-    char *merged_string = cJSON_PrintUnformatted(base_array);
-
-    cJSON_Delete(base_array);
-    cJSON_Delete(delta_array);
-
-    return merged_string;
-}
-
-/**
  * @brief (Leader-only) Creates and stages the leader's own genesis credentials.
  */
 void leader_bootstrap_self_join() {
@@ -843,11 +1159,10 @@ void leader_bootstrap_self_join() {
     raft_state_get_self_info(my_ip, sizeof(my_ip), NULL, 0);
     ESP_LOGI(TAG, "Leader %s is performing genesis self-join to create initial credentials.", my_ip);
 
-    const int num_challenges_for_genesis = 5;
+    const int num_challenges_for_genesis = CRPS_PER_VERIFIER;
     for (int i = 0; i < num_challenges_for_genesis; i++) {
         char challenge[64], response[64];
-        uint32_t random_part = esp_random();
-        snprintf(challenge, sizeof(challenge), "GENESIS_%s_%lu_%d", my_ip, random_part, i);
+        puf_format_challenge(i, my_ip, challenge, sizeof(challenge));
         simulate_puf_response((const uint8_t *)challenge, strlen(challenge), response);
 
         CRPNode crp = {0};
@@ -869,6 +1184,8 @@ void leader_bootstrap_self_join() {
  * @param cnodes_delta_json A pointer to the cJSON array where the new CNode entries will be added.
  */
 static void leader_delegate_genesis_credentials(JoinProcess* job, const char *new_follower_ip, cJSON *cnodes_delta_obj) {
+    (void)job;
+    (void)cnodes_delta_obj;
     ESP_LOGI(TAG, "This is the first follower. Delegating my genesis credentials to %s.", new_follower_ip);
 
     char my_ip[INET_ADDRSTRLEN];
@@ -880,30 +1197,23 @@ static void leader_delegate_genesis_credentials(JoinProcess* job, const char *ne
         return;
     }
 
-    cJSON *cnode_item;
-    cJSON_ArrayForEach(cnode_item, cnodes_delta_obj) {
-        cJSON *target_item = cJSON_GetObjectItem(cnode_item, "t");
-        cJSON *holder_item = cJSON_GetObjectItem(cnode_item, "h");
-
-        if (cJSON_IsString(target_item) && strcmp(target_item->valuestring, my_ip) == 0 &&
-            cJSON_IsString(holder_item) && strcmp(holder_item->valuestring, my_ip) == 0) {
-            
-            cJSON *challenge_item = cJSON_GetObjectItem(cnode_item, "c");
-            if (cJSON_IsString(challenge_item)) {
-                CRPNode* crp = db_get_crp_by_challenge(challenge_item->valuestring);
-                if (crp) {
-                    cJSON *crp_json = cJSON_CreateObject();
-                    cJSON_AddStringToObject(crp_json, "c", crp->challenge);
-                    cJSON_AddStringToObject(crp_json, "r", crp->response);
-                    cJSON_AddStringToObject(crp_json, "t", crp->target_ip);
-                    cJSON_AddItemToArray(crps_to_delegate_json, crp_json);
-                    free(crp);
-                }
-                cJSON_ReplaceItemInObject(cnode_item, "h", cJSON_CreateString(new_follower_ip));
-                db_join_tmp_update_cnode_holder(job->transaction_id, challenge_item->valuestring, my_ip, new_follower_ip);
-            }
+    // The genesis credentials were committed to the network state when the Coordinator was alone, with the
+    // Coordinator as their holder. They are moved to the first device before the network state is sent to
+    // it, so that from now on the Coordinator, too, is checked by another device.
+    char challenges[CRPS_PER_VERIFIER][64];
+    int moved = db_reassign_self_cnodes(my_ip, new_follower_ip, challenges, CRPS_PER_VERIFIER);
+    for (int i = 0; i < moved; i++) {
+        CRPNode* crp = db_get_crp_by_challenge(challenges[i]);
+        if (crp) {
+            cJSON *crp_json = cJSON_CreateObject();
+            cJSON_AddStringToObject(crp_json, "c", crp->challenge);
+            cJSON_AddStringToObject(crp_json, "r", crp->response);
+            cJSON_AddStringToObject(crp_json, "t", crp->target_ip);
+            cJSON_AddItemToArray(crps_to_delegate_json, crp_json);
+            free(crp);
         }
     }
+    ESP_LOGI(TAG, "Delegated %d genesis CRPs to %s.", cJSON_GetArraySize(crps_to_delegate_json), new_follower_ip);
 
     char *crps_str = cJSON_PrintUnformatted(crps_to_delegate_json);
     if (crps_str) {
@@ -981,6 +1291,7 @@ static void master_finalize_and_commit_join(JoinProcess* job) {
                 }
                 free(msg_broadcast);
                 job->commit_ack_count = 0;
+                job->commit_majority_ms = 0;
                 job->expected_commit_acks = nodes_to_notify;
 
                 ESP_LOGD(TAG, "[TID: %lu] HEAL job (master_finalize) sent NODE_HEALED_COMMIT to %d followers", job->transaction_id, nodes_to_notify);
@@ -1009,7 +1320,7 @@ static void master_finalize_and_commit_join(JoinProcess* job) {
     bool is_first_follower = (db_get_follower_count() == 0);
 
     char *nodes_json_full = db_export_nodes_json();
-    char *cnodes_json_base_str = db_export_cnode_json();
+    char *cnodes_json_base_str = NULL;
     char *cnodes_json_delta_str = db_join_tmp_export_cnodes_json(job->transaction_id);
     cJSON *cnodes_delta_obj = cJSON_Parse(cnodes_json_delta_str);
     if (!cnodes_delta_obj)
@@ -1020,25 +1331,42 @@ static void master_finalize_and_commit_join(JoinProcess* job) {
     }
 
     char *final_delta_str = cJSON_PrintUnformatted(cnodes_delta_obj);
-    char *cnodes_final_for_new_node_str = merge_cnode_json(cnodes_json_base_str, final_delta_str);
+    // The network state for the new device: the members (JSON) and the challenges (compact form), sent in
+    // NET_STATE parts before JOIN_FINALIZE, since with many devices it does not fit in one message.
+    char *cnodes_final_for_new_node_str = db_export_state_compact(final_delta_str);
 
     const char *nodes_str = nodes_json_full ? nodes_json_full : "[]";
-    const char *cnodes_final_str = cnodes_final_for_new_node_str ? cnodes_final_for_new_node_str : "[]";
+    const char *cnodes_final_str = cnodes_final_for_new_node_str ? cnodes_final_for_new_node_str : "#";
     const char *delta_to_broadcast_str = final_delta_str ? final_delta_str : "[]";
+
+    size_t state_len = strlen(nodes_str) + 1 + strlen(cnodes_final_str);
+    char *state = malloc(state_len + 1);
+    if (state) {
+        snprintf(state, state_len + 1, "%s|%s", nodes_str, cnodes_final_str);
+        int parts = (int)((state_len + NET_STATE_CHUNK_SIZE - 1) / NET_STATE_CHUNK_SIZE);
+        char *msg_part = malloc(NET_STATE_CHUNK_SIZE + 128);
+        for (int part = 0; msg_part && part < parts; part++) {
+            char nonce_hex_part[NONCE_HEX_SIZE];
+            uint8_t nonce_part[NONCE_SIZE];
+            generate_nonce(nonce_part, NONCE_SIZE);
+            bytes_to_hex(nonce_part, nonce_hex_part, NONCE_SIZE);
+            size_t off = (size_t)part * NET_STATE_CHUNK_SIZE;
+            int n = (int)((state_len - off) < NET_STATE_CHUNK_SIZE ? (state_len - off) : NET_STATE_CHUNK_SIZE);
+            snprintf(msg_part, NET_STATE_CHUNK_SIZE + 128, "%s:%lu:%d:%d:%s:%.*s\n", MSG_NET_STATE, job->transaction_id, part, parts,
+                     nonce_hex_part, n, state + off);
+            connection_pool_send(job->new_node_ip, msg_part);
+        }
+        free(msg_part);
+        free(state);
+    }
 
     char nonce_hex_finalize[NONCE_HEX_SIZE];
     uint8_t nonce_finalize[NONCE_SIZE];
     generate_nonce(nonce_finalize, NONCE_SIZE);
     bytes_to_hex(nonce_finalize, nonce_hex_finalize, NONCE_SIZE);
-    int finalize_msg_size = snprintf(NULL, 0, "%s:%lu:1:%s:%s:%s\n", MSG_JOIN_FINALIZE, job->transaction_id, nodes_str, cnodes_final_str, nonce_hex_finalize);
-    if (finalize_msg_size > 0) {
-        char *msg_finalize = malloc(finalize_msg_size + 1);
-        if (msg_finalize) {
-            snprintf(msg_finalize, finalize_msg_size + 1, "%s:%lu:1:%s:%s:%s\n", MSG_JOIN_FINALIZE, job->transaction_id, nodes_str, cnodes_final_str, nonce_hex_finalize);
-            connection_pool_send(job->new_node_ip, msg_finalize);
-            free(msg_finalize);
-        }
-    }
+    char msg_finalize[128];
+    snprintf(msg_finalize, sizeof(msg_finalize), "%s:%lu:1:@:%s\n", MSG_JOIN_FINALIZE, job->transaction_id, nonce_hex_finalize);
+    connection_pool_send(job->new_node_ip, msg_finalize);
 
     char nonce_hex_commit[NONCE_HEX_SIZE];
     uint8_t nonce_commit[NONCE_SIZE];
@@ -1062,6 +1390,7 @@ static void master_finalize_and_commit_join(JoinProcess* job) {
             }
             free(msg_broadcast);
             job->commit_ack_count = 0;
+            job->commit_majority_ms = 0;
             job->expected_commit_acks = nodes_to_notify;
         }
     }
@@ -1114,9 +1443,10 @@ void finalize_join_process(JoinProcess* job, bool is_success) {
  */
 static void leader_finalize_commit(JoinProcess* job) {
     ESP_LOGI(TAG, "[JoinID: %lu] All ACKs received or not required. Finalizing leader's commit.", job->transaction_id);
-    if (job->type != JOIN_TYPE_HEAL_NODE) {
-        db_join_commit(job->transaction_id);
-    }
+    // A heal is committed at once as well: heals run one at a time, so the next one sees the updated
+    // assignments, and the staged data cannot be cleared first by the cleanup order sent below, which
+    // also reaches this device when it is one of the new Verifiers.
+    db_join_commit(job->transaction_id);
 
     char cleanup_msg[128];
     char nonce_hex_cleanup[NONCE_HEX_SIZE];
@@ -1130,6 +1460,9 @@ static void leader_finalize_commit(JoinProcess* job) {
     }
 
     if (job->in_use && job->type == JOIN_TYPE_NEW_NODE) {
+        // The new member receives the list of excluded devices, which every member keeps.
+        raft_send_blacklist_to(job->new_node_ip);
+
         char event_msg[64];
         snprintf(event_msg, sizeof(event_msg), "JOIN_COMPLETE:%s", job->new_node_ip);
         send_monitoring_tcp_event(event_msg);
@@ -1242,12 +1575,32 @@ void join_handle_message(char *message, const char *from_ip) {
             bool do_finalize = false;
             bool do_rollback = false;
             bool handled = false;
+            char excluded_candidate_ip[INET_ADDRSTRLEN] = {0};
 
             TAKE_JOIN_MUTEX(__FUNCTION__);
             if (pending_join.in_use && transaction_id == pending_join.transaction_id && is_ip_in_verifier_list(&pending_join, from_ip)) {
+                // Each Verifier is counted once, so that a single device cannot stand in for the others.
+                int verifier_index = -1;
+                for (int i = 0; i < pending_join.verifier_count && i < MAX_VERIFIERS; i++) {
+                    if (strcmp(pending_join.verifier_ips[i], from_ip) == 0) {
+                        verifier_index = i;
+                        break;
+                    }
+                }
+                if (verifier_index < 0 || (pending_join.reported_verifiers_mask & (1u << verifier_index))) {
+                    ESP_LOGW(TAG, "[JoinID: %lu] Duplicate %s from %s ignored.", transaction_id, MSG_CHL_RESULT, from_ip);
+                    GIVE_JOIN_MUTEX(__FUNCTION__);
+                    goto cleanup;
+                }
+                pending_join.reported_verifiers_mask |= (1u << verifier_index);
+
                 pending_join.received_verifier_results++;
                 int correct = atoi(correct_str);
                 int total = atoi(total_str);
+                // A negative count means that the candidate returned a proof different from the reference.
+                if (correct < 0 && pending_join.type == JOIN_TYPE_NEW_NODE) {
+                    pending_join.wrong_proof_results++;
+                }
 
                 if (correct != total) {
                     ESP_LOGE(TAG, "[JoinID: %lu] Verifier %s reported failure (%d/%d).", transaction_id, from_ip, correct, total);
@@ -1256,10 +1609,27 @@ void join_handle_message(char *message, const char *from_ip) {
                     ESP_LOGI(TAG, "[JoinID: %lu] Verifier %s reported success (%d/%d).", transaction_id, from_ip, correct, total);
                 }
 
+                // One Verifier that does not confirm is enough to refuse the candidate. Excluding it for good
+                // takes the majority of its Verifiers, so that a single Verifier cannot ban a device.
+                int exclusion_quorum = VERIFIER_QUORUM(pending_join.expected_verifier_results);
+                if (exclusion_quorum < MIN_VERIFIERS_TO_EXCLUDE) exclusion_quorum = MIN_VERIFIERS_TO_EXCLUDE;
+                const bool all_reported = pending_join.received_verifier_results >= pending_join.expected_verifier_results;
+                const bool exclude = pending_join.wrong_proof_results >= exclusion_quorum;
+
+                if (exclude) {
+                    strncpy(excluded_candidate_ip, pending_join.new_node_ip, INET_ADDRSTRLEN - 1);
+                }
+
                 if (pending_join.failed_verifier_results > 0) {
-                    ESP_LOGW(TAG, "[JoinID: %lu] A verifier failed. Rolling back immediately.", transaction_id);
-                    do_rollback = true;
-                } else if (pending_join.received_verifier_results == pending_join.expected_verifier_results) {
+                    if (exclude || all_reported || pending_join.wrong_proof_results == 0) {
+                        ESP_LOGW(TAG, "[JoinID: %lu] A verifier failed. Rolling back.", transaction_id);
+                        do_rollback = true;
+                    } else {
+                        // The join is already refused; the other Verifiers are awaited to decide on the exclusion.
+                        ESP_LOGW(TAG, "[JoinID: %lu] Wrong proof reported by %d verifier(s). Waiting for the others (%d/%d).", transaction_id,
+                                 pending_join.wrong_proof_results, pending_join.received_verifier_results, pending_join.expected_verifier_results);
+                    }
+                } else if (all_reported) {
                     ESP_LOGI(TAG, "[JoinID: %lu] All %d verifiers reported success. Finalizing join.", transaction_id, pending_join.expected_verifier_results);
                     do_finalize = true;
                 } else {
@@ -1268,6 +1638,15 @@ void join_handle_message(char *message, const char *from_ip) {
                 handled = true;
             }
             GIVE_JOIN_MUTEX(__FUNCTION__);
+
+            if (excluded_candidate_ip[0] != '\0') {
+                char failed_mac[MAC_ADDR_STR_LEN];
+                if (discovery_get_mac_for_ip(excluded_candidate_ip, failed_mac, sizeof(failed_mac))) {
+                    ESP_LOGE(TAG, "[JoinID: %lu] The majority of the verifiers reported a wrong proof. Excluding %s.", transaction_id, excluded_candidate_ip);
+                    raft_state_blacklist_mac(failed_mac);
+                    raft_broadcast_blacklist_entry(failed_mac);
+                }
+            }
 
             if (do_rollback) {
                 master_trigger_join_rollback(&pending_join); 
@@ -1377,6 +1756,23 @@ void join_handle_message(char *message, const char *from_ip) {
             }
             xSemaphoreGive(heal_pool_mutex);
         }
+    } else if (strcmp(command, MSG_BROKER_REQ) == 0) {
+        if (is_from_leader) {
+            char *saveptr;
+            char *transaction_id_str = strtok_r(payload, ":", &saveptr);
+            char *prover_ip = strtok_r(NULL, ":", &saveptr);
+            char *verifier_ip = strtok_r(NULL, ":", &saveptr);
+            char *nonce = strtok_r(NULL, "", &saveptr);
+            if (!transaction_id_str || !prover_ip || !verifier_ip || !nonce || !nonce_is_valid_and_store(nonce)) {
+                ESP_LOGE(TAG, "Malformed %s from %s", MSG_BROKER_REQ, from_ip);
+                goto cleanup;
+            }
+
+            uint32_t transaction_id = strtoul(transaction_id_str, NULL, 10);
+            if (!auth_puf_broker_enrollment(transaction_id, prover_ip, verifier_ip)) {
+                ESP_LOGE(TAG, "[JoinID: %lu] Could not deliver the enrollment key for %s and %s.", transaction_id, prover_ip, verifier_ip);
+            }
+        }
     } else if (strcmp(command, MSG_REQ_CHL_GEN) == 0) {
         if (is_from_leader) {
             char *saveptr;
@@ -1384,9 +1780,10 @@ void join_handle_message(char *message, const char *from_ip) {
             char *target_ip = strtok_r(NULL, ":", &saveptr);
             char *num_challenges_str = strtok_r(NULL, ":", &saveptr);
             char *challenges_list_str = strtok_r(NULL, ":", &saveptr);
+            char *broker_ip = strtok_r(NULL, ":", &saveptr);
             char *nonce = strtok_r(NULL, "", &saveptr);
 
-            if (!transaction_id_str || !target_ip || !num_challenges_str || !challenges_list_str || !nonce || !nonce_is_valid_and_store(nonce)) {
+            if (!transaction_id_str || !target_ip || !num_challenges_str || !challenges_list_str || !broker_ip || !nonce || !nonce_is_valid_and_store(nonce)) {
                 ESP_LOGE(TAG, "Malformed %s from %s", MSG_REQ_CHL_GEN, from_ip);
                 goto cleanup;
             }
@@ -1441,7 +1838,8 @@ void join_handle_message(char *message, const char *from_ip) {
                     strncpy(challenge, challenge_token, sizeof(challenge) - 1);
                     challenge[sizeof(challenge) - 1] = '\0';
 
-                simulate_puf_response((const uint8_t *)challenge, strlen(challenge), response);
+                // The response is that of the Prover, which arrives with JOIN_RESPONSE.
+                snprintf(response, sizeof(response), "%s", DB_PENDING_RESPONSE);
                 CRPNode crp = {0};
                 snprintf(crp.challenge, sizeof(crp.challenge), "%s", challenge);
                 snprintf(crp.response, sizeof(crp.response), "%s", response);
@@ -1465,11 +1863,18 @@ void join_handle_message(char *message, const char *from_ip) {
             uint8_t nonce_batch_chl[NONCE_SIZE];
             generate_nonce(nonce_batch_chl, NONCE_SIZE);
             bytes_to_hex(nonce_batch_chl, nonce_hex_batch_chl, NONCE_SIZE);
-            int msg_size_prover = snprintf(NULL, 0, "%s:%s:%s:%s\n", MSG_JOIN_CHL, transaction_id_str, batch_chl_str, nonce_hex_batch_chl);
+            // When an intermediary gives the two parties a key, the responses must come back encrypted.
+            bool secure_enrollment = strcmp(broker_ip, ENROLL_NO_BROKER) != 0;
+            const char secure_marker[2] = {secure_enrollment ? ENROLL_SECURE_MARKER : '\0', '\0'};
+            if (secure_enrollment) {
+                expect_secure_enrollment(transaction_id, target_ip);
+            }
+
+            int msg_size_prover = snprintf(NULL, 0, "%s:%s:%s%s:%s\n", MSG_JOIN_CHL, transaction_id_str, secure_marker, batch_chl_str, nonce_hex_batch_chl);
             if (msg_size_prover > 0) {
                 char *msg_to_prover = malloc(msg_size_prover + 1);
                 if (msg_to_prover && batch_chl_str) {
-                    snprintf(msg_to_prover, msg_size_prover + 1, "%s:%s:%s:%s\n", MSG_JOIN_CHL, transaction_id_str, batch_chl_str, nonce_hex_batch_chl);
+                    snprintf(msg_to_prover, msg_size_prover + 1, "%s:%s:%s%s:%s\n", MSG_JOIN_CHL, transaction_id_str, secure_marker, batch_chl_str, nonce_hex_batch_chl);
                     connection_pool_send(target_ip, msg_to_prover);
                     free(msg_to_prover);
                 }
@@ -1529,6 +1934,10 @@ void join_handle_message(char *message, const char *from_ip) {
         }
         GIVE_NEW_NODE_STATE_MUTEX(__FUNCTION__);
         if (is_legit) {
+            bool secure_enrollment = json_payload[0] == ENROLL_SECURE_MARKER;
+            if (secure_enrollment) {
+                json_payload++;
+            }
             cJSON *req_root = cJSON_Parse(json_payload);
             cJSON *resp_root = cJSON_CreateArray();
             if (!req_root || !cJSON_IsArray(req_root) || !resp_root) {
@@ -1545,12 +1954,38 @@ void join_handle_message(char *message, const char *from_ip) {
                     }
                     char response[64];
                     simulate_puf_response((const uint8_t *)challenge, strlen(challenge), response);
+                    remember_pending_challenge(from_ip, challenge);
                     cJSON *resp_item = cJSON_CreateObject();
                     cJSON_AddStringToObject(resp_item, "c", challenge);
                     cJSON_AddStringToObject(resp_item, "r", response);
                     cJSON_AddItemToArray(resp_root, resp_item);
                 }
                 char *resp_json_str = cJSON_PrintUnformatted(resp_root);
+
+                if (secure_enrollment && resp_json_str) {
+                    // The responses leave the device only under the key received from the intermediary.
+                    uint32_t secure_tid = strtoul(transaction_id_str, NULL, 10);
+                    uint8_t enroll_key[AUTH_KEY_SIZE];
+                    char *sealed_str = NULL;
+                    if (auth_puf_enroll_key_wait(secure_tid, from_ip, enroll_key, ENROLL_KEY_WAIT_MS)) {
+                        size_t sealed_size = strlen(ENROLL_SEALED_PREFIX) + (strlen(resp_json_str) + 28) * 2 + 1;
+                        sealed_str = malloc(sealed_size);
+                        if (sealed_str) {
+                            strcpy(sealed_str, ENROLL_SEALED_PREFIX);
+                            if (!auth_puf_seal(enroll_key, transaction_id_str, (const uint8_t *)resp_json_str, strlen(resp_json_str),
+                                               sealed_str + strlen(ENROLL_SEALED_PREFIX), sealed_size - strlen(ENROLL_SEALED_PREFIX))) {
+                                free(sealed_str);
+                                sealed_str = NULL;
+                            }
+                        }
+                        auth_puf_enroll_key_drop(secure_tid, from_ip);
+                    } else {
+                        ESP_LOGE(TAG, "[JoinID: %s] No enrollment key received for verifier %s. Responses are not sent.", transaction_id_str, from_ip);
+                    }
+                    memset(enroll_key, 0, sizeof(enroll_key));
+                    free(resp_json_str);
+                    resp_json_str = sealed_str;
+                }
                 char nonce_hex[NONCE_HEX_SIZE];
                 uint8_t new_nonce[NONCE_SIZE];
                 generate_nonce(new_nonce, NONCE_SIZE);
@@ -1607,30 +2042,73 @@ void join_handle_message(char *message, const char *from_ip) {
             goto cleanup;
         }
 
+        // Responses of a protected enrollment are accepted only if they arrive encrypted.
+        char *opened_payload = NULL;
+        bool must_be_sealed = take_secure_enrollment(transaction_id, from_ip);
+        bool is_sealed = strncmp(json_payload, ENROLL_SEALED_PREFIX, strlen(ENROLL_SEALED_PREFIX)) == 0;
+        if (must_be_sealed || is_sealed) {
+            uint8_t enroll_key[AUTH_KEY_SIZE];
+            const char *sealed_hex = json_payload + strlen(ENROLL_SEALED_PREFIX);
+            if (is_sealed && auth_puf_enroll_key_wait(transaction_id, from_ip, enroll_key, ENROLL_KEY_WAIT_MS)) {
+                size_t opened_size = strlen(sealed_hex) / 2 + 1;
+                opened_payload = calloc(1, opened_size);
+                if (opened_payload && auth_puf_open(enroll_key, transaction_id_str, sealed_hex, (uint8_t *)opened_payload, opened_size - 1) < 0) {
+                    free(opened_payload);
+                    opened_payload = NULL;
+                }
+                auth_puf_enroll_key_drop(transaction_id, from_ip);
+            }
+            memset(enroll_key, 0, sizeof(enroll_key));
+            if (!opened_payload) {
+                ESP_LOGE(TAG, "[JoinID: %s] Responses from %s are not protected as required. Rejected.", transaction_id_str, from_ip);
+            }
+            json_payload = opened_payload ? opened_payload : "";
+        }
+
         cJSON *root = cJSON_Parse(json_payload);
         if (!root || !cJSON_IsArray(root)) {
             ESP_LOGE(TAG, "Failed to parse response JSON array from %s.", from_ip);
         } else {
             int correct_count = 0;
             int total_count = 0;
+            CRPNode enrolled_crp = {0};
             cJSON *item;
             cJSON_ArrayForEach(item, root) {
                 total_count++;
                 char *challenge = cJSON_GetObjectItem(item, "c")->valuestring;
                 char *response = cJSON_GetObjectItem(item, "r")->valuestring;
                 CRPNode *expected_crp = db_join_tmp_get_crp_by_challenge(transaction_id, challenge);
-                if (expected_crp) {                    
+                if (expected_crp) {
+                    strncpy(enrolled_crp.challenge, challenge, sizeof(enrolled_crp.challenge) - 1);
+                    strncpy(enrolled_crp.response, response, sizeof(enrolled_crp.response) - 1);
+                    strncpy(enrolled_crp.target_ip, from_ip, sizeof(enrolled_crp.target_ip) - 1);                    
                     ESP_LOGI("DEBUG_CMP", "Enrolling CRP for challenge: %s", challenge);
                     ESP_LOGI("DEBUG_CMP", "  - Received Response: '%s'", response);
 
-                    strncpy(expected_crp->response, response, sizeof(expected_crp->response) - 1);
-                    db_join_tmp_insert_crp(transaction_id, expected_crp);
+                    db_join_tmp_update_crp_response(transaction_id, challenge, response);
                     correct_count++;
                     free(expected_crp);
                 } else {
                     ESP_LOGE("DEBUG_CMP", "Challenge '%s' not found in temporary DB!", challenge);
                 }
             }
+            // The device is attested with a CRP it has just enrolled, so that the attestation is bound
+            // to its PUF. A device that fails is reported as a failed enrollment.
+            if (total_count == 0) {
+                total_count = 1;
+            } else if (correct_count == total_count && strcmp(from_ip, my_ip) != 0) {
+                hatt_result_t outcome = hatt_verifier_attest(from_ip, &enrolled_crp);
+                if (outcome == HATT_FAILED) {
+                    ESP_LOGE(TAG, "[JoinID: %s] Device %s failed the attestation bound to its enrolled CRP.", transaction_id_str, from_ip);
+                    // A negative count tells the Coordinator that the attestation, not the enrollment, failed.
+                    correct_count = -1;
+                } else if (outcome == HATT_NO_ANSWER) {
+                    ESP_LOGE(TAG, "[JoinID: %s] Device %s did not complete the attestation bound to its enrolled CRP.", transaction_id_str, from_ip);
+                    correct_count = 0;
+                }
+            }
+            memset(&enrolled_crp, 0, sizeof(enrolled_crp));
+
             if (has_leader) {
                 char result_msg[256];
                 char nonce_hex[NONCE_HEX_SIZE];
@@ -1643,6 +2121,8 @@ void join_handle_message(char *message, const char *from_ip) {
         }
         if (root)
             cJSON_Delete(root);
+        if (opened_payload)
+            free(opened_payload);
         if (first_colon) {
             *first_colon = original_first_char;
         }
@@ -1699,6 +2179,20 @@ void join_handle_message(char *message, const char *from_ip) {
                 *last_colon = original_last_char;
             }
         }
+    } else if (strcmp(command, MSG_NET_STATE) == 0) {
+        if (is_from_leader) {
+            char *saveptr;
+            char *tid_str = strtok_r(payload, ":", &saveptr);
+            char *part_str = strtok_r(NULL, ":", &saveptr);
+            char *parts_str = strtok_r(NULL, ":", &saveptr);
+            char *nonce = strtok_r(NULL, ":", &saveptr);
+            char *data = strtok_r(NULL, "", &saveptr);
+            if (!tid_str || !part_str || !parts_str || !nonce || !data || !nonce_is_valid_and_store(nonce)) {
+                ESP_LOGW(TAG, "Malformed or replayed %s from %s", command, from_ip);
+                goto cleanup;
+            }
+            net_state_add(strtoul(tid_str, NULL, 10), atoi(part_str), atoi(parts_str), data);
+        }
     } else if (strcmp(command, MSG_JOIN_FINALIZE) == 0) {
         if (is_from_leader) {
             char *saveptr;
@@ -1713,33 +2207,30 @@ void join_handle_message(char *message, const char *from_ip) {
             char *json_start = payload + strlen(transaction_id_str) + 1 + strlen(result_str) + 1;
 
             if (atoi(result_str) == 1) {
-                char *nodes_json_end = strstr(json_start, "]:");
-                if (!nodes_json_end) {
-                    ESP_LOGE(TAG, "Malformed %s: separator ']:' not found.", command);
+                // The network state arrived before, in NET_STATE parts: "<members JSON>|<compact challenges>".
+                if (strncmp(json_start, "@:", 2) != 0) {
+                    ESP_LOGE(TAG, "Malformed %s: network state marker not found.", command);
                     goto cleanup;
                 }
-                *(nodes_json_end + 1) = '\0';
-                char *nodes_json_str = json_start;
-
-                char *cnodes_and_nonce = nodes_json_end + 2;
-                char *last_colon = strrchr(cnodes_and_nonce, ':');
-                if (!last_colon) {
-                    ESP_LOGE(TAG, "Malformed %s: nonce separator not found.", command);
-                    goto cleanup;
-                }
-                *last_colon = '\0';
-                char *cnodes_json_str = cnodes_and_nonce;
-                char *nonce = last_colon + 1;
-
+                char *nonce = json_start + 2;
                 if (!nonce_is_valid_and_store(nonce)) {
                     ESP_LOGW(TAG, "Invalid or replayed nonce for successful %s from %s", MSG_JOIN_FINALIZE, from_ip);
                     xSemaphoreGive(join_result_semaphore);
                     goto cleanup;
                 }
+                uint32_t finalize_tid = strtoul(transaction_id_str, NULL, 10);
+                char *separator = net_state_complete(finalize_tid) ? strchr(net_state.buf, '|') : NULL;
+                if (!separator) {
+                    ESP_LOGE(TAG, "[JoinID: %lu] The network state was not received completely.", finalize_tid);
+                    xSemaphoreGive(join_result_semaphore);
+                    goto cleanup;
+                }
+                *separator = '\0';
+                char *nodes_json_str = net_state.buf;
 
                 ESP_LOGI(TAG, "Join successful. Importing network state.");
                 db_import_nodes_json(nodes_json_str);
-                db_import_cnode_json(cnodes_json_str);
+                db_import_state_compact(separator + 1);
 
                 ESP_LOGW(TAG, "Starting Raft protocol as a new cluster member...");
 
@@ -1803,8 +2294,6 @@ void join_handle_message(char *message, const char *from_ip) {
                     xSemaphoreGive(join_result_semaphore);
                     goto cleanup;
                 }
-
-                *last_colon = ':';
             } else {
                 join_result_success = false;
                 char *nonce = strtok_r(NULL, "", &saveptr);
@@ -1881,6 +2370,7 @@ void join_handle_message(char *message, const char *from_ip) {
                 JoinProcess* job = &pending_heal_jobs[i];
                 if (job->in_use && transaction_id == job->transaction_id) {
                     job->commit_ack_count++;
+                    note_commit_majority(job);
 
                     ESP_LOGD(TAG, "[TID: %lu] Received COMMIT_ACK from follower %s. Status: %d/%d received.", transaction_id, from_ip, job->commit_ack_count, job->expected_commit_acks);
 
@@ -1905,6 +2395,7 @@ void join_handle_message(char *message, const char *from_ip) {
             TAKE_JOIN_MUTEX(__FUNCTION__);
             if (pending_join.in_use && transaction_id == pending_join.transaction_id) {
                 pending_join.commit_ack_count++;
+                note_commit_majority(&pending_join);
                 if (pending_join.commit_ack_count >= pending_join.expected_commit_acks) {
                     ESP_LOGI(TAG, "All commit ACKs received. Finalizing join for %s.", pending_join.new_node_ip);
                     db_insert_node(pending_join.new_node_ip, pending_join.new_node_ip);
@@ -1923,9 +2414,10 @@ void join_handle_message(char *message, const char *from_ip) {
         if (is_from_leader) {
             char *saveptr;
             char *transaction_id_str = strtok_r(payload, ":", &saveptr);
+            char *target_ip = strtok_r(NULL, ":", &saveptr);
             char *nonce = strtok_r(NULL, "", &saveptr);
 
-            if (!nonce || !nonce_is_valid_and_store(nonce)) {
+            if (!transaction_id_str || !target_ip || !nonce || !nonce_is_valid_and_store(nonce)) {
                 ESP_LOGW(TAG, "Invalid or replayed nonce for %s from %s", command, from_ip);
                 goto cleanup;
             }
@@ -1934,7 +2426,11 @@ void join_handle_message(char *message, const char *from_ip) {
 
             ESP_LOGW(TAG, "[JoinID: %lu] Received join abort command from leader.", transaction_id);
             db_join_tmp_clear_by_tid(transaction_id);
-            connection_pool_remove_peer(from_ip);
+            // Only the candidate, added to the pool for the enrollment, is dropped: the connection to the
+            // Coordinator, and to a candidate that is already a Raft peer (a heal), must stay open.
+            if (!raft_state_is_peer(target_ip)) {
+                connection_pool_remove_peer(target_ip);
+            }
         }
     } else if (strcmp(command, MSG_CLEANUP_COMMIT) == 0) {
         if (is_from_leader) {
@@ -2146,6 +2642,12 @@ static void leader_heal_task_runner(void *pvParameters) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     ESP_LOGI(TAG, "Bootstrap: SYNC notification received. All nodes have completed their join process.");
 
+    // The devices that joined first received fewer Verifiers, because the network was still small:
+    // every device is brought to ceil(rho N) Verifiers before the bootstrap is complete.
+    if (!auth_remove_heal_network()) {
+        ESP_LOGE(TAG, "Bootstrap: the final heal did not complete for every device.");
+    }
+
     char my_ip[INET_ADDRSTRLEN];
     char my_mac[MAC_ADDR_STR_LEN];
     get_my_ip(my_ip, sizeof(my_ip));
@@ -2351,4 +2853,27 @@ void auth_join_run_heal_job_async(join_request_t request) {
         free(req_copy);
         xSemaphoreGive(caller_sync_sem);
     }
+}
+
+bool auth_join_operation_in_progress(void) {
+    bool busy = false;
+    TickType_t now = xTaskGetTickCount();
+    taskENTER_CRITICAL(&pending_enrollment_spinlock);
+    for (int i = 0; i < MAX_PENDING_ENROLLMENTS && !busy; i++) {
+        busy = secure_enrollments[i].in_use && (now - secure_enrollments[i].created) * portTICK_PERIOD_MS <= PENDING_ENROLLMENT_TTL_MS;
+    }
+    taskEXIT_CRITICAL(&pending_enrollment_spinlock);
+    if (busy) return true;
+
+    if (join_mutex) {
+        TAKE_JOIN_MUTEX(__FUNCTION__);
+        busy = pending_join.in_use;
+        GIVE_JOIN_MUTEX(__FUNCTION__);
+    }
+    if (!busy && heal_pool_mutex) {
+        xSemaphoreTake(heal_pool_mutex, portMAX_DELAY);
+        for (int i = 0; i < MAX_PARALLEL_HEALS && !busy; i++) busy = pending_heal_jobs[i].in_use;
+        xSemaphoreGive(heal_pool_mutex);
+    }
+    return busy;
 }

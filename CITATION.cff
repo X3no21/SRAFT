@@ -22,16 +22,16 @@ authors:
     email: mariano.ceccato@univr.it
 license: MIT
 repository-code: "https://github.com/X3no21/SRAFT"
-version: v1.0.0
-date-released: "2026-07-31"
-doi: 10.5281/zenodo.21724795
+version: v1.1.0
+date-released: "2026-11-02"
+doi: 10.5281/zenodo.21724794
 identifiers:
-  - type: doi
-    value: 10.5281/zenodo.21724795
-    description: "Archived v1.0.0 release of this repository on Zenodo"
   - type: doi
     value: 10.5281/zenodo.21724794
     description: "Concept DOI resolving to the latest release"
+  - type: doi
+    value: 10.5281/zenodo.21724795
+    description: "Archived v1.0.0 release of this repository on Zenodo"
 keywords:
   - IoT security
   - device authentication

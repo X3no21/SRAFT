@@ -1,0 +1,2 @@
+CSV/XLSX cross-check: 72 device/run records, four metrics each.
+Fault JSON/CSV cross-check: all 290 runs, authentication counts and recovery-time sum.

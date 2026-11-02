@@ -1,0 +1,8 @@
+# Partition table for the build with encryption at rest (see sdkconfig.flashenc.defaults).
+# The NVS partition holds the CRP shards and is protected by NVS encryption; its keys are in
+# nvs_keys, which is encrypted by flash encryption.
+# Name,   Type, SubType,  Offset, Size,    Flags
+nvs,      data, nvs,      ,       0x10000,
+phy_init, data, phy,      ,       0x1000,
+nvs_keys, data, nvs_keys, ,       0x1000,  encrypted
+factory,  app,  factory,  ,       1500K,

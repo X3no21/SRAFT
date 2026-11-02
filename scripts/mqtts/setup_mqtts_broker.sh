@@ -24,6 +24,10 @@ CERT_DIR="/etc/mosquitto/certs"
 MOSQUITTO_CONF_DIR="/etc/mosquitto/conf.d"
 MOSQUITTO_CONF_FILE="${MOSQUITTO_CONF_DIR}/mtls.conf"
 PROJECT_CERTS_DIR="$(dirname "$(dirname "$(realpath "$0")")")/../main/certs"
+# Real certificates are kept in main/certs_local/ (gitignored); main/certs/ only holds placeholders.
+if [ -f "${PROJECT_CERTS_DIR}_local/device.key" ]; then
+    PROJECT_CERTS_DIR="${PROJECT_CERTS_DIR}_local"
+fi
 
 DO_FULL_SETUP=false
 if [ "$1" == "-r" ]; then

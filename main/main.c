@@ -35,9 +35,9 @@ void app_main(void) {
 
     ESP_ERROR_CHECK(psa_crypto_init() == PSA_SUCCESS ? ESP_OK : ESP_FAIL);
 
-    ESP_LOGI(TAG, "Initializing SRAM-PUF...");
-    init_sram_puf();
-    
+    // The SRAM PUF is read when SRAFT is started (/start), not at boot, so that a device used only for
+    // the TLS and MQTTS baselines does not run any part of SRAFT.
+
     monitoring_init();
 
     ESP_LOGI(TAG, "App started. Initializing WiFi...");
@@ -46,5 +46,6 @@ void app_main(void) {
     ESP_LOGI(TAG, "WiFi connected. Starting REST API server.");
     rest_api_start();
     
+    log_heap("app_main finished");
     ESP_LOGI(TAG, "app_main setup finished. System is idle, waiting for commands via REST API.");
 }

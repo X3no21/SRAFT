@@ -1,0 +1,181 @@
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{groupplot}[group style={group size=1 by 4, vertical sep=0.25cm, x descriptions at=edge bottom}, width=0.95\linewidth, height=4.0cm, boxplot/draw direction=y, xtick={3,5,7,9,11,13,15,17,19,21,23,25,27,29,31}, xticklabel style={font=\tiny}, yticklabel style={font=\tiny}, label style={font=\tiny}]
+\nextgroupplot[ylabel={Duration (s)}, xlabel={}, xmajorgrids=true, ymajorgrids=true, grid style=dashed]
+\addplot+ [boxplot prepared={
+lower whisker=8.703857, lower quartile=9.142722, median=10.603335, upper quartile=12.193494, upper whisker=13.227985, draw position=5, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=7.948922, lower quartile=9.774265, median=10.510623, upper quartile=11.793234, upper whisker=12.900566, draw position=7, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=11.912307, lower quartile=13.899376, median=16.271147, upper quartile=17.457986, upper whisker=19.738297, draw position=9, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=13.273185, lower quartile=15.877347, median=17.502742, upper quartile=18.705341, upper whisker=20.901189, draw position=11, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=14.536961, lower quartile=19.959777, median=21.077479, upper quartile=22.577346, upper whisker=24.659195, draw position=13, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=18.384677, lower quartile=21.287628, median=23.400137, upper quartile=25.435788, upper whisker=31.032077, draw position=15, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=18.092451, lower quartile=26.411412, median=27.345503, upper quartile=28.902024, upper whisker=33.911118, draw position=17, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=25.541955, lower quartile=26.446151, median=29.505191, upper quartile=33.295903, upper whisker=39.410288, draw position=19, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=24.814566, lower quartile=29.772657, median=34.778954, upper quartile=37.697047, upper whisker=39.754082, draw position=21, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=28.459676, lower quartile=31.217267, median=37.975654, upper quartile=41.241778, upper whisker=44.201799, draw position=23, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=31.295529, lower quartile=38.170173, median=39.920482, upper quartile=43.494262, upper whisker=51.540415, draw position=25, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=33.552894, lower quartile=40.068064, median=45.118777, upper quartile=47.487057, upper whisker=55.973247, draw position=27, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=33.950338, lower quartile=43.383116, median=46.908039, upper quartile=49.918810, upper whisker=59.998821, draw position=29, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=36.329310, lower quartile=46.532816, median=50.573964, upper quartile=57.161431, upper whisker=59.603794, draw position=31, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\nextgroupplot[ylabel={CPU (\%)}, xlabel={}, xmajorgrids=true, ymajorgrids=true, grid style=dashed]
+\addplot+ [boxplot prepared={
+lower whisker=8.076766, lower quartile=11.150186, median=18.103025, upper quartile=31.493668, upper whisker=43.949821, draw position=5, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=7.795546, lower quartile=16.983347, median=27.166905, upper quartile=33.255876, upper whisker=51.592835, draw position=7, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=8.356098, lower quartile=12.934698, median=16.431814, upper quartile=20.436076, upper whisker=28.266153, draw position=9, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=11.740127, lower quartile=16.939818, median=20.421379, upper quartile=25.768584, upper whisker=34.979074, draw position=11, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=10.949040, lower quartile=16.889059, median=20.994369, upper quartile=25.569714, upper whisker=34.545259, draw position=13, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=11.464896, lower quartile=17.145075, median=21.081743, upper quartile=25.414805, upper whisker=34.114195, draw position=15, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=11.665566, lower quartile=17.492765, median=21.013573, upper quartile=25.849677, upper whisker=34.067852, draw position=17, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=12.326401, lower quartile=17.035937, median=21.043156, upper quartile=25.544966, upper whisker=35.963230, draw position=19, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=11.143624, lower quartile=17.661455, median=20.550711, upper quartile=25.789367, upper whisker=34.583821, draw position=21, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=11.892592, lower quartile=17.306054, median=20.890367, upper quartile=25.506917, upper whisker=35.568090, draw position=23, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=10.397412, lower quartile=17.187683, median=20.802278, upper quartile=25.676971, upper whisker=33.584358, draw position=25, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=10.842890, lower quartile=17.469189, median=20.631131, upper quartile=25.746723, upper whisker=34.965383, draw position=27, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=11.557443, lower quartile=17.299014, median=20.671628, upper quartile=25.898030, upper whisker=33.911481, draw position=29, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=11.694209, lower quartile=17.321207, median=20.937362, upper quartile=25.534891, upper whisker=34.982352, draw position=31, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\nextgroupplot[ylabel={Memory (\%)}, xlabel={}, xmajorgrids=true, ymajorgrids=true, grid style=dashed]
+\addplot+ [boxplot prepared={
+lower whisker=67.886576, lower quartile=69.154350, median=69.926931, upper quartile=70.477573, upper whisker=72.085493, draw position=5, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=67.462242, lower quartile=69.183576, median=69.831272, upper quartile=70.403045, upper whisker=72.384768, draw position=7, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=67.356950, lower quartile=68.920562, median=69.645611, upper quartile=70.297419, upper whisker=73.102206, draw position=9, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=67.535339, lower quartile=69.284317, median=69.804000, upper quartile=70.698647, upper whisker=73.428824, draw position=11, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=67.462764, lower quartile=69.390162, median=70.060893, upper quartile=70.805687, upper whisker=74.192760, draw position=13, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=68.173949, lower quartile=69.984985, median=70.470395, upper quartile=71.589891, upper whisker=74.570854, draw position=15, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=68.516203, lower quartile=70.482801, median=71.209608, upper quartile=72.077226, upper whisker=75.242535, draw position=17, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=68.452243, lower quartile=70.956463, median=71.483914, upper quartile=72.334912, upper whisker=75.222696, draw position=19, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=69.493054, lower quartile=71.570508, median=72.277043, upper quartile=73.130923, upper whisker=75.979873, draw position=21, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=69.788224, lower quartile=71.906680, median=72.561230, upper quartile=73.382354, upper whisker=76.465603, draw position=23, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=70.927672, lower quartile=72.737022, median=73.470918, upper quartile=74.420147, upper whisker=77.278932, draw position=25, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=71.640495, lower quartile=73.843992, median=74.376712, upper quartile=75.371137, upper whisker=78.262871, draw position=27, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=71.807172, lower quartile=74.133422, median=74.826637, upper quartile=75.778588, upper whisker=78.969207, draw position=29, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=73.268190, lower quartile=75.342835, median=76.004396, upper quartile=76.966442, upper whisker=80.114859, draw position=31, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\nextgroupplot[ylabel={Estimated power (mW)}, xlabel={Network size before the operation}, xmajorgrids=true, ymajorgrids=true, grid style=dashed]
+\addplot+ [boxplot prepared={
+lower whisker=197.173989, lower quartile=216.951446, median=261.692968, upper quartile=347.861751, upper whisker=428.017097, draw position=5, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=195.364340, lower quartile=254.487835, median=320.019035, upper quartile=359.201562, upper whisker=477.199895, draw position=7, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=198.971488, lower quartile=228.434780, median=250.938728, upper quartile=276.706149, upper whisker=327.092694, draw position=9, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=220.747716, lower quartile=254.207729, median=276.611575, upper quartile=311.020836, upper whisker=370.290341, draw position=11, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=215.657071, lower quartile=253.881093, median=280.298763, upper quartile=309.741109, upper whisker=367.498745, draw position=13, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=218.976605, lower quartile=255.528558, median=280.861014, upper quartile=308.744272, upper whisker=364.724847, draw position=15, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=220.267916, lower quartile=257.765943, median=280.422345, upper quartile=311.542669, upper whisker=364.426628, draw position=17, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=224.520387, lower quartile=254.826253, median=280.612710, upper quartile=309.581855, upper whisker=376.623382, draw position=19, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=216.909221, lower quartile=258.851464, median=277.443828, upper quartile=311.154574, upper whisker=367.746886, draw position=21, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=221.728827, lower quartile=256.564458, median=279.629513, upper quartile=309.337011, upper whisker=374.080657, draw position=23, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=212.107348, lower quartile=255.802738, median=279.062658, upper quartile=310.431307, upper whisker=361.315344, draw position=25, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=214.973998, lower quartile=257.614232, median=277.961328, upper quartile=310.880165, upper whisker=370.202241, draw position=27, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=219.572144, lower quartile=256.519154, median=278.221924, upper quartile=311.853824, upper whisker=363.420380, draw position=29, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\addplot+ [boxplot prepared={
+lower whisker=220.452236, lower quartile=256.661967, median=279.931924, upper quartile=309.517021, upper whisker=370.311433, draw position=31, box extend=1.5}, draw=black, fill=cyan!40, solid] coordinates {};
+
+\end{groupplot}
+\end{tikzpicture}
+\caption{RQ4: Removal operation. \rev{Detection delay is excluded; no removal record is available at 3 devices.} Boxes show device/run records; whiskers span the observed minimum and maximum.}
+\label{fig:RQ4-Removal}
+\end{figure}

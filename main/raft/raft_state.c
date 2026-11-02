@@ -4,9 +4,11 @@
  * ============================= */
 
 #include "raft_state.h"
+#include "nvs.h"
 #include "rest_api.h"
 #include "utility.h"
 #include "integrity_verification.h"
+#include "hatt_protocol.h"
 #include "esp_netif.h"
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -21,6 +23,11 @@ static const char *TAG = "RAFT_STATE";
 
 static raft_node_t node;
 static SemaphoreHandle_t raft_state_mutex = NULL;
+
+// Last claim of the Coordinator role that this node checked before accepting it, and its outcome.
+static char checked_leader_ip[INET_ADDRSTRLEN] = {0};
+static uint32_t checked_leader_term = 0;
+static bool checked_leader_passed = false;
 
 #define TAKE_RAFT_STATE_MUTEX(func_name) do { \
     ESP_LOGD("RAFT_MUTEX", "Attempting to take lock in %s", func_name); \
@@ -108,6 +115,18 @@ static void fetch_own_info() {
              mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
 }
 
+static void blacklist_load_unsafe(void);
+
+/**
+ * @brief (Internal) Time that an election needs in addition to the base timeout.
+ * @details Every voter attests the candidate before voting, and the candidate measures its memory
+ * once per voter, one measurement at a time. The timers of an election grow with the number of voters,
+ * so that a candidate is not replaced while it is still being attested.
+ */
+static uint32_t attestation_allowance_ms_unsafe(void) {
+    return (uint32_t)node.peer_count * HATT_MEASUREMENT_BUDGET_MS;
+}
+
 /**
  * @brief Initializes the RAFT state module, including the mutex.
  * @details Must be called once before any other function in this module. It allocates
@@ -127,6 +146,7 @@ void raft_state_init(void) {
     node.state = FOLLOWER;
     node.current_election_timeout_ms = ELECTION_TIMEOUT_BASE_MS;
     fetch_own_info();
+    blacklist_load_unsafe();
     GIVE_RAFT_STATE_MUTEX(__FUNCTION__);
 }
 
@@ -227,12 +247,13 @@ uint32_t __raft_state_become_candidate_unsafe(void) {
     strncpy(node.voted_for, node.my_ip, sizeof(node.voted_for) - 1);
     node.voted_for[sizeof(node.voted_for) - 1] = '\0';
     node.vote_count = 1;
+    node.voter_count = 0;
     strcpy(node.leader_ip, "");
     strcpy(node.leader_mac, "");
     new_term = node.current_term;
 
     if (node.election_timer) {
-        uint32_t random_election_timeout_ms = node.current_election_timeout_ms + (esp_random() % ELECTION_TIMEOUT_RANDOM_WINDOW_MS);
+        uint32_t random_election_timeout_ms = node.current_election_timeout_ms + attestation_allowance_ms_unsafe() + (esp_random() % ELECTION_TIMEOUT_RANDOM_WINDOW_MS);
         xTimerChangePeriod(node.election_timer, pdMS_TO_TICKS(random_election_timeout_ms), 0);
         xTimerStart(node.election_timer, 0);
     }
@@ -287,7 +308,10 @@ void __raft_state_become_follower_unsafe(uint32_t new_term) {
     }
 
     if (node.heartbeat_timer) {
-        xTimerChangePeriod(node.heartbeat_timer, pdMS_TO_TICKS(HEARTBEAT_TIMEOUT_MS), 0);
+        // Randomized as in Raft: with the same timeout, the followers of a lost Coordinator would all
+        // start an election at the same time and split the votes again at every term.
+        uint32_t heartbeat_timeout_ms = HEARTBEAT_TIMEOUT_MS + attestation_allowance_ms_unsafe() + (esp_random() % ELECTION_TIMEOUT_RANDOM_WINDOW_MS);
+        xTimerChangePeriod(node.heartbeat_timer, pdMS_TO_TICKS(heartbeat_timeout_ms), 0);
         xTimerStart(node.heartbeat_timer, 0);
     }
     node.last_heartbeat_received_at = xTaskGetTickCount();
@@ -565,7 +589,45 @@ bool raft_state_handle_request_vote(uint32_t rpc_term, const char* rpc_candidate
  */
 void raft_state_handle_heartbeat(uint32_t rpc_term, const char *rpc_leader_ip, const char *rpc_leader_mac) {
     TAKE_RAFT_STATE_MUTEX(__FUNCTION__);
-    
+    if (rpc_term < node.current_term) {
+        GIVE_RAFT_STATE_MUTEX(__FUNCTION__);
+        return;
+    }
+    // The Coordinator already followed in this term, or the one this node voted for after attesting
+    // it, is accepted at once. Any other claim of the role, e.g. with a higher term and no election,
+    // must pass an integrity check first, as a vote does.
+    bool known = rpc_term == node.current_term &&
+                 (strcmp(node.leader_ip, rpc_leader_ip) == 0 || strcmp(node.voted_for, rpc_leader_ip) == 0);
+    bool checked = rpc_term == checked_leader_term && strcmp(checked_leader_ip, rpc_leader_ip) == 0;
+    bool refused = checked && !checked_leader_passed;
+    for (int i = 0; i < node.blacklist_count && !refused; i++) {
+        refused = strcmp(node.blacklisted_macs[i], rpc_leader_mac) == 0;
+    }
+    GIVE_RAFT_STATE_MUTEX(__FUNCTION__);
+
+    if (refused) return;
+    if (!known && !checked) {
+        ESP_LOGW(TAG, "%s claims the Coordinator role for term %lu without this node's vote. Integrity check before accepting it...", rpc_leader_ip, rpc_term);
+        bool passed = integrity_verification_run_single(rpc_leader_ip, rpc_leader_mac);
+        TAKE_RAFT_STATE_MUTEX(__FUNCTION__);
+        // A check that fails, or gets no answer, is not repeated for the same claim.
+        checked_leader_term = rpc_term;
+        strncpy(checked_leader_ip, rpc_leader_ip, sizeof(checked_leader_ip) - 1);
+        checked_leader_ip[sizeof(checked_leader_ip) - 1] = '\0';
+        checked_leader_passed = passed;
+        GIVE_RAFT_STATE_MUTEX(__FUNCTION__);
+        if (!passed) {
+            ESP_LOGE(TAG, "Coordinator claim of %s for term %lu REFUSED: integrity check not passed.", rpc_leader_ip, rpc_term);
+            char my_mac[MAC_ADDR_STR_LEN];
+            get_my_mac(my_mac, sizeof(my_mac));
+            char event_msg[128];
+            snprintf(event_msg, sizeof(event_msg), "INTEGRITY_CHECK_FAILED:%s:%s", rpc_leader_mac, my_mac);
+            send_monitoring_tcp_event(event_msg);
+            return;
+        }
+    }
+
+    TAKE_RAFT_STATE_MUTEX(__FUNCTION__);
     if (rpc_term >= node.current_term) {
         if (rpc_term > node.current_term || node.state != FOLLOWER) {
             __raft_state_become_follower_unsafe(rpc_term);
@@ -585,14 +647,24 @@ void raft_state_handle_heartbeat(uint32_t rpc_term, const char *rpc_leader_ip, c
 }
 
 /**
- * @brief Atomically increments the vote count for the current node.
- * @return The new vote count after incrementing.
+ * @brief Atomically counts the vote of a voter for the current node.
+ * @details A voter is counted once per term, however many votes it sends.
+ * @param voter_ip The IP address of the voter, which is the sender of the vote.
+ * @return The new vote count, or -1 if the vote of this voter was already counted.
  */
-int raft_state_increment_vote_count(void) {
-    int new_count = 0;
+int raft_state_record_vote(const char *voter_ip) {
+    uint32_t addr = inet_addr(voter_ip);
+    int new_count = -1;
     TAKE_RAFT_STATE_MUTEX(__FUNCTION__);
-    node.vote_count++;
-    new_count = node.vote_count;
+    bool counted = false;
+    for (int i = 0; i < node.voter_count && !counted; i++) {
+        counted = node.voter_addrs[i] == addr;
+    }
+    if (!counted && node.voter_count < MAX_COUNTED_VOTERS) {
+        node.voter_addrs[node.voter_count++] = addr;
+        node.vote_count++;
+        new_count = node.vote_count;
+    }
     GIVE_RAFT_STATE_MUTEX(__FUNCTION__);
     return new_count;
 }
@@ -635,29 +707,108 @@ void raft_state_get_log_info(uint32_t *last_log_index, uint32_t *last_log_term) 
     GIVE_RAFT_STATE_MUTEX(__FUNCTION__);
 }
 
+#define BLACKLIST_NVS_NAMESPACE "sraft_bl"
+#define BLACKLIST_NVS_KEY "macs"
+
 /**
- * @brief Adds a MAC address to the blacklist to prevent it from being voted for.
- * @param mac_to_blacklist The null-terminated MAC address string to add.
- * @return void
+ * @brief (Internal) Loads the list of excluded devices from non-volatile storage.
  */
-void raft_state_blacklist_mac(const char *mac_to_blacklist) {
-    TAKE_RAFT_STATE_MUTEX(__FUNCTION__);
-    if (node.blacklist_count < 10) {
-        bool already_exists = false;
-        for (int i = 0; i < node.blacklist_count; i++) {
-            if (strcmp(node.blacklisted_macs[i], mac_to_blacklist) == 0) {
-                already_exists = true;
-                break;
+static void blacklist_load_unsafe(void) {
+    nvs_handle_t handle;
+    node.blacklist_count = 0;
+    if (nvs_open(BLACKLIST_NVS_NAMESPACE, NVS_READONLY, &handle) == ESP_OK) {
+        size_t size = sizeof(node.blacklisted_macs);
+        if (nvs_get_blob(handle, BLACKLIST_NVS_KEY, node.blacklisted_macs, &size) == ESP_OK) {
+            for (int i = 0; i < MAX_BLACKLIST && node.blacklisted_macs[i][0] != '\0'; i++) {
+                node.blacklisted_macs[i][MAC_ADDR_STR_LEN - 1] = '\0';
+                node.blacklist_count++;
             }
         }
-        if (!already_exists) {
-            strncpy(node.blacklisted_macs[node.blacklist_count], mac_to_blacklist, MAC_ADDR_STR_LEN - 1);
-            node.blacklisted_macs[node.blacklist_count][MAC_ADDR_STR_LEN - 1] = '\0';
-            node.blacklist_count++;
-            ESP_LOGW(TAG, "MAC address %s has been added to the blacklist.", mac_to_blacklist);
+        nvs_close(handle);
+    }
+    if (node.blacklist_count > 0) {
+        ESP_LOGW(TAG, "Loaded %d excluded devices from storage.", node.blacklist_count);
+    }
+}
+
+/**
+ * @brief (Internal) Stores the list of excluded devices in non-volatile storage.
+ */
+static void blacklist_store_unsafe(void) {
+    nvs_handle_t handle;
+    if (nvs_open(BLACKLIST_NVS_NAMESPACE, NVS_READWRITE, &handle) == ESP_OK) {
+        if (nvs_set_blob(handle, BLACKLIST_NVS_KEY, node.blacklisted_macs, sizeof(node.blacklisted_macs)) != ESP_OK ||
+            nvs_commit(handle) != ESP_OK) {
+            ESP_LOGE(TAG, "Could not store the list of excluded devices.");
+        }
+        nvs_close(handle);
+    }
+}
+
+/**
+ * @brief Adds a MAC address to the list of excluded devices.
+ * @details An excluded device is denied any vote and any join request. The list is permanent.
+ * @param mac_to_blacklist The null-terminated MAC address string to add.
+ * @return true if the address was added, false if it was already listed or the list is full.
+ */
+bool raft_state_blacklist_mac(const char *mac_to_blacklist) {
+    bool added = false;
+    TAKE_RAFT_STATE_MUTEX(__FUNCTION__);
+    bool already_exists = false;
+    for (int i = 0; i < node.blacklist_count; i++) {
+        if (strcmp(node.blacklisted_macs[i], mac_to_blacklist) == 0) {
+            already_exists = true;
+            break;
         }
     }
+    if (!already_exists && node.blacklist_count < MAX_BLACKLIST) {
+        strncpy(node.blacklisted_macs[node.blacklist_count], mac_to_blacklist, MAC_ADDR_STR_LEN - 1);
+        node.blacklisted_macs[node.blacklist_count][MAC_ADDR_STR_LEN - 1] = '\0';
+        node.blacklist_count++;
+        blacklist_store_unsafe();
+        added = true;
+        ESP_LOGW(TAG, "MAC address %s has been added to the blacklist.", mac_to_blacklist);
+    } else if (!already_exists) {
+        ESP_LOGE(TAG, "The blacklist is full. MAC address %s was not added.", mac_to_blacklist);
+    }
     GIVE_RAFT_STATE_MUTEX(__FUNCTION__);
+    return added;
+}
+
+bool raft_state_is_blacklisted(const char *mac) {
+    bool found = false;
+    TAKE_RAFT_STATE_MUTEX(__FUNCTION__);
+    for (int i = 0; i < node.blacklist_count && !found; i++) {
+        found = strcmp(node.blacklisted_macs[i], mac) == 0;
+    }
+    GIVE_RAFT_STATE_MUTEX(__FUNCTION__);
+    return found;
+}
+
+int raft_state_get_blacklist(char macs[][MAC_ADDR_STR_LEN], int max_entries) {
+    int count = 0;
+    TAKE_RAFT_STATE_MUTEX(__FUNCTION__);
+    for (int i = 0; i < node.blacklist_count && count < max_entries; i++) {
+        strncpy(macs[count], node.blacklisted_macs[i], MAC_ADDR_STR_LEN);
+        count++;
+    }
+    GIVE_RAFT_STATE_MUTEX(__FUNCTION__);
+    return count;
+}
+
+void raft_state_clear_blacklist(void) {
+    nvs_handle_t handle;
+    if (nvs_open(BLACKLIST_NVS_NAMESPACE, NVS_READWRITE, &handle) == ESP_OK) {
+        nvs_erase_key(handle, BLACKLIST_NVS_KEY);
+        nvs_commit(handle);
+        nvs_close(handle);
+    }
+    if (raft_state_mutex != NULL) {
+        TAKE_RAFT_STATE_MUTEX(__FUNCTION__);
+        memset(node.blacklisted_macs, 0, sizeof(node.blacklisted_macs));
+        node.blacklist_count = 0;
+        GIVE_RAFT_STATE_MUTEX(__FUNCTION__);
+    }
 }
 
 /**
@@ -817,4 +968,12 @@ uint32_t raft_state_get_last_heartbeat_age(void) {
     GIVE_RAFT_STATE_MUTEX(__FUNCTION__);
     
     return pdTICKS_TO_MS(xTaskGetTickCount() - last_tick);
+}
+
+int raft_state_get_peer_count(void) {
+    if (raft_state_mutex == NULL) return 0;
+    TAKE_RAFT_STATE_MUTEX(__FUNCTION__);
+    int count = node.peer_count;
+    GIVE_RAFT_STATE_MUTEX(__FUNCTION__);
+    return count;
 }

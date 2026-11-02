@@ -3,6 +3,7 @@
  * Description: Manages a pool of unified, dynamic, bidirectional TCP connections to peer nodes.
  * ============================= */
 
+#include "esp_heap_caps.h"
 #include "connection_pool.h"
 #include "raft_state.h"
 #include "utility.h"
@@ -30,13 +31,23 @@ typedef struct {
     bool is_initiator;
     TickType_t last_reconnect_attempt;
     uint32_t next_reconnect_delay_ms;
-    char rx_buffer[MAX_MESSAGE_SIZE * 2];
+    // Allocated only while part of a message is waiting for the rest, so that idle peers take no buffer.
+    char *rx_buffer;
     int rx_len;
 } peer_connection_t;
 
+#define PEER_RX_BUFFER_SIZE (MAX_MESSAGE_SIZE * 2)
+// How long a message may wait for room in the send buffer of a peer before the connection is reset.
+#define PEER_SEND_TIMEOUT_MS 3000
+// A silent peer is probed after 5 s and declared dead after 3 probes 2 s apart.
+#define PEER_KEEPALIVE_IDLE_S 5
+#define PEER_KEEPALIVE_INTERVAL_S 2
+#define PEER_KEEPALIVE_COUNT 3
+
 typedef struct {
     char target_ip[INET_ADDRSTRLEN];
-    char message[MAX_MESSAGE_SIZE];
+    // Sized to the message: a fixed buffer of MAX_MESSAGE_SIZE for every queued message wastes the heap.
+    char message[];
 } outgoing_message_t;
 
 static peer_connection_t* connection_pool = NULL;
@@ -74,12 +85,33 @@ static TaskHandle_t self_handler_task_handle = NULL;
  */
 static void close_peer_connection(peer_connection_t* p) {
     if (p->sock_fd >= 0) {
+        // Abortive close: the data still queued for a peer that has failed is dropped at once, instead of
+        // being kept for retransmission while the connection is closed.
+        struct linger lg = { .l_onoff = 1, .l_linger = 0 };
+        setsockopt(p->sock_fd, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg));
         close(p->sock_fd);
         ESP_LOGI(TAG, "Closed connection with %s (socket %d)", p->peer_ip, p->sock_fd);
     }
     p->sock_fd = -1;
     p->state = CONN_STATE_DISCONNECTED;
     p->rx_len = 0;
+    free(p->rx_buffer);
+    p->rx_buffer = NULL;
+}
+
+/**
+ * @brief Options of a connection with a peer: no Nagle delay, and TCP keepalive, so that a peer that fails
+ * without closing the connection (power loss, crash) is detected within seconds and the data queued for it
+ * does not accumulate in memory.
+ */
+static void configure_peer_socket(int sock) {
+    int optval = 1;
+    setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &optval, sizeof(optval));
+    setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &optval, sizeof(optval));
+    int idle = PEER_KEEPALIVE_IDLE_S, interval = PEER_KEEPALIVE_INTERVAL_S, count = PEER_KEEPALIVE_COUNT;
+    setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+    setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &interval, sizeof(interval));
+    setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &count, sizeof(count));
 }
 
 /**
@@ -191,15 +223,16 @@ static void connection_manager_task(void *pvParameters) {
 
             if (connect(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr)) == 0) {
                 ESP_LOGI(TAG, "Successfully connected to peer %s on socket %d.", peer_ip, sock);
-                int optval = 1;
-                if (setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &optval, sizeof(optval)) < 0) {
-                    ESP_LOGW(TAG, "Failed to set TCP_NODELAY for outgoing socket %s", peer_ip);
-                }
+                configure_peer_socket(sock);
                 set_nonblocking(sock);
 
                 TAKE_POOL_MUTEX(__FUNCTION__);
                 peer_connection_t* p = find_peer_by_ip(peer_ip);
                 if (p) {
+                    if (p->sock_fd >= 0 && p->sock_fd != sock) close(p->sock_fd);
+                    p->rx_len = 0;
+                    free(p->rx_buffer);
+                    p->rx_buffer = NULL;
                     p->sock_fd = sock;
                     p->state = CONN_STATE_CONNECTED;
                     p->next_reconnect_delay_ms = RECONNECT_BASE_INTERVAL_MS;
@@ -246,7 +279,12 @@ static void connection_listener_task(void *pvParameters) {
         return;
     }
     
-    listen(listen_sock, RAFT_LISTEN_BACKLOG);
+    if (listen_sock < 0 || listen(listen_sock, RAFT_LISTEN_BACKLOG) != 0) {
+        ESP_LOGE(TAG, "Listener failed to listen on port %d (errno %d). Deleting task.", PORT, errno);
+        if (listen_sock >= 0) close(listen_sock);
+        vTaskDelete(NULL);
+        return;
+    }
     ESP_LOGI(TAG, "Connection listener started on port %d.", PORT);
 
     while (1) {
@@ -255,13 +293,12 @@ static void connection_listener_task(void *pvParameters) {
         int client_sock = accept(listen_sock, (struct sockaddr *)&client_addr, &addr_len);
         if (client_sock < 0) {
             ESP_LOGE(TAG, "Failed to accept connection: %s", strerror(errno));
+            // Do not spin on a persistent error (e.g., no memory): it would starve the other tasks.
+            vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
 
-        int optval = 1;
-        if (setsockopt(client_sock, IPPROTO_TCP, TCP_NODELAY, &optval, sizeof(optval)) < 0) {
-             ESP_LOGW(TAG, "Failed to set TCP_NODELAY for incoming socket");
-        }
+        configure_peer_socket(client_sock);
         set_nonblocking(client_sock);
 
         char client_ip[INET_ADDRSTRLEN];
@@ -278,11 +315,17 @@ static void connection_listener_task(void *pvParameters) {
                     close(p->sock_fd);
                 }
                 p->sock_fd = client_sock;
+                p->rx_len = 0;
+                free(p->rx_buffer);
+                p->rx_buffer = NULL;
                 p->state = CONN_STATE_CONNECTED;
                 ESP_LOGI(TAG, "Loopback connection for self registered on socket %d", client_sock);
             } else if (!p->is_initiator) {
                 if (p->sock_fd >= 0) close(p->sock_fd);
                 p->sock_fd = client_sock;
+                p->rx_len = 0;
+                free(p->rx_buffer);
+                p->rx_buffer = NULL;
                 p->state = CONN_STATE_CONNECTED;
                 p->next_reconnect_delay_ms = RECONNECT_BASE_INTERVAL_MS;
                 ESP_LOGI(TAG, "Accepted and registered connection from %s on socket %d", client_ip, client_sock);
@@ -308,6 +351,33 @@ static void connection_listener_task(void *pvParameters) {
         }
         GIVE_POOL_MUTEX(__FUNCTION__);
     }
+}
+
+/**
+ * @brief Sends a whole message on a non-blocking socket, waiting while its send buffer is full.
+ * @return true if every byte was sent within the timeout.
+ */
+static bool send_all(int sock, const char *buf, size_t len, uint32_t timeout_ms) {
+    size_t sent = 0;
+    TickType_t start = xTaskGetTickCount();
+    while (sent < len) {
+        int n = send(sock, buf + sent, len - sent, 0);
+        if (n > 0) {
+            sent += (size_t)n;
+            continue;
+        }
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            if ((xTaskGetTickCount() - start) * portTICK_PERIOD_MS >= timeout_ms) return false;
+            fd_set write_fds;
+            FD_ZERO(&write_fds);
+            FD_SET(sock, &write_fds);
+            struct timeval tv = { .tv_sec = 0, .tv_usec = 20000 };
+            select(sock + 1, NULL, &write_fds, NULL, &tv);
+            continue;
+        }
+        return false;
+    }
+    return true;
 }
 
 /**
@@ -338,8 +408,17 @@ static void message_io_task(void *pvParameters) {
         }
         GIVE_POOL_MUTEX(__FUNCTION__);
         
+        // A complete message already in a buffer is delivered without waiting for new data.
+        bool buffered_message = false;
+        TAKE_POOL_MUTEX(__FUNCTION__);
+        for (int i = 0; i < pool_size && !buffered_message; i++) {
+            buffered_message = connection_pool[i].state == CONN_STATE_CONNECTED &&
+                               connection_pool[i].rx_buffer && strchr(connection_pool[i].rx_buffer, '\n');
+        }
+        GIVE_POOL_MUTEX(__FUNCTION__);
+
         tv.tv_sec = 0;
-        tv.tv_usec = 1000;
+        tv.tv_usec = buffered_message ? 0 : 1000;
         int activity = select(max_fd + 1, &read_fds, NULL, NULL, &tv);
 
         if (activity < 0 && errno == EBADF) {
@@ -354,49 +433,56 @@ static void message_io_task(void *pvParameters) {
             continue;
         }
 
-        if (activity > 0) {
-            char *received_message = malloc(MAX_MESSAGE_SIZE);
-            if (received_message == NULL) {
-                ESP_LOGE(TAG, "Failed to allocate memory for receive buffer. Deleting task.");
-                vTaskDelete(NULL);
-                return;
-            }
+        if (activity > 0 || buffered_message) {
+            // Only this task uses the buffer, so it is allocated once instead of at every message.
+            static char received_message[MAX_MESSAGE_SIZE];
             char sender_ip[INET_ADDRSTRLEN];
             bool message_ready = false;
 
             TAKE_POOL_MUTEX(__FUNCTION__);
-            for (int i = 0; i < pool_size; i++) {
+            for (int i = 0; i < pool_size && !message_ready; i++) {
                 peer_connection_t* p = &connection_pool[i];
-                if (p->state == CONN_STATE_CONNECTED && FD_ISSET(p->sock_fd, &read_fds)) {
-                    int len = recv(p->sock_fd, p->rx_buffer + p->rx_len, sizeof(p->rx_buffer) - p->rx_len - 1, 0);
-                    
+                if (p->state != CONN_STATE_CONNECTED) continue;
+
+                bool has_complete = p->rx_buffer && strchr(p->rx_buffer, '\n');
+                if (!has_complete && activity > 0 && FD_ISSET(p->sock_fd, &read_fds)) {
+                    if (!p->rx_buffer) {
+                        p->rx_buffer = malloc(PEER_RX_BUFFER_SIZE);
+                        if (!p->rx_buffer) continue;
+                        p->rx_len = 0;
+                        p->rx_buffer[0] = '\0';
+                    }
+                    int len = recv(p->sock_fd, p->rx_buffer + p->rx_len, PEER_RX_BUFFER_SIZE - p->rx_len - 1, 0);
+
                     if (len <= 0) {
                         ESP_LOGW(TAG, "Peer %s disconnected (recv returned %d).", p->peer_ip, len);
                         close_peer_connection(p);
                         continue;
                     }
-                    
+
                     p->rx_len += len;
                     p->rx_buffer[p->rx_len] = '\0';
+                }
 
-                    char *msg_end = strchr(p->rx_buffer, '\n');
-                    if (msg_end) {
-                        *msg_end = '\0';
-                        
-                        strncpy(received_message, p->rx_buffer, MAX_MESSAGE_SIZE - 1);
-                        received_message[MAX_MESSAGE_SIZE - 1] = '\0';
-                        
-                        strncpy(sender_ip, p->peer_ip, sizeof(sender_ip) - 1);
-                        sender_ip[sizeof(sender_ip) - 1] = '\0';
+                char *msg_end = p->rx_buffer ? strchr(p->rx_buffer, '\n') : NULL;
+                if (msg_end) {
+                    *msg_end = '\0';
 
-                        message_ready = true;
-                        
-                        p->rx_len -= (msg_end - p->rx_buffer + 1);
-                        memmove(p->rx_buffer, msg_end + 1, p->rx_len);
-                        p->rx_buffer[p->rx_len] = '\0';
+                    strncpy(received_message, p->rx_buffer, MAX_MESSAGE_SIZE - 1);
+                    received_message[MAX_MESSAGE_SIZE - 1] = '\0';
 
-                        break; 
-                    }
+                    strncpy(sender_ip, p->peer_ip, sizeof(sender_ip) - 1);
+                    sender_ip[sizeof(sender_ip) - 1] = '\0';
+
+                    message_ready = true;
+
+                    p->rx_len -= (msg_end - p->rx_buffer + 1);
+                    memmove(p->rx_buffer, msg_end + 1, p->rx_len);
+                    p->rx_buffer[p->rx_len] = '\0';
+                }
+                if (p->rx_buffer && p->rx_len == 0) {
+                    free(p->rx_buffer);
+                    p->rx_buffer = NULL;
                 }
             }
             GIVE_POOL_MUTEX(__FUNCTION__);
@@ -404,41 +490,37 @@ static void message_io_task(void *pvParameters) {
             if (message_ready && message_handler) {
                 message_handler(sender_ip, received_message);
             }
-
-            free(received_message);
         }
 
         outgoing_message_t *msg_to_send;
         while (xQueueReceive(outgoing_message_queue, &msg_to_send, 0) == pdTRUE) {
+            int sock = -1;
+            char peer_ip[INET_ADDRSTRLEN] = {0};
             TAKE_POOL_MUTEX(__FUNCTION__);
             peer_connection_t* p = find_peer_by_ip(msg_to_send->target_ip);
             if (p && p->state == CONN_STATE_CONNECTED) {
-                    char *clean_message = malloc(MAX_MESSAGE_SIZE);
-                    if (clean_message == NULL) {
-                        ESP_LOGE(TAG, "Failed to allocate memory for receive buffer. Deleting task.");
-                        vTaskDelete(NULL);
-                        return;
-                }
-                strncpy(clean_message, msg_to_send->message, MAX_MESSAGE_SIZE - 1);
-                clean_message[MAX_MESSAGE_SIZE - 1] = '\0';
-                char *newline = strchr(clean_message, '\n');
-                if (newline) *newline = '\0';
-
-                if (send(p->sock_fd, msg_to_send->message, strlen(msg_to_send->message), 0) < 0) {
-                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                        ESP_LOGW(TAG, "Socket busy (EAGAIN) sending to %s. Dropping message to prevent blocking.", p->peer_ip);
-                    } else {
-                        ESP_LOGE(TAG, "Send failed to %s (errno %d), closing connection.", p->peer_ip, errno);
-                        close_peer_connection(p);
-                    }
-                } else {
-                    ESP_LOGI(TAG, "-> RPC SENT from %s to %s: %s", my_ip, p->peer_ip, clean_message);
-                }
-                free(clean_message);
-            } else {
-                ESP_LOGW(TAG, "Could not send to %s, connection not ready. Message dropped.", msg_to_send->target_ip);
+                sock = p->sock_fd;
+                strncpy(peer_ip, p->peer_ip, sizeof(peer_ip) - 1);
             }
             GIVE_POOL_MUTEX(__FUNCTION__);
+
+            if (sock < 0) {
+                ESP_LOGW(TAG, "Could not send to %s, connection not ready. Message dropped.", msg_to_send->target_ip);
+            } else {
+                const char *text = msg_to_send->message;
+                const char *newline = strchr(text, '\n');
+                int shown = newline ? (int)(newline - text) : (int)strlen(text);
+                if (send_all(sock, text, strlen(text), PEER_SEND_TIMEOUT_MS)) {
+                    ESP_LOGI(TAG, "-> RPC SENT from %s to %s: %.*s", my_ip, peer_ip, shown, text);
+                } else {
+                    // A message sent in part would corrupt the stream, so the connection is closed and opened again.
+                    ESP_LOGE(TAG, "Send to %s failed or timed out (errno %d), closing connection.", peer_ip, errno);
+                    TAKE_POOL_MUTEX(__FUNCTION__);
+                    peer_connection_t* q = find_peer_by_ip(peer_ip);
+                    if (q && q->sock_fd == sock) close_peer_connection(q);
+                    GIVE_POOL_MUTEX(__FUNCTION__);
+                }
+            }
 
             free(msg_to_send);
         }
@@ -487,10 +569,13 @@ void connection_pool_start(char **peers, int num_peers, message_handler_callback
         pool_size++;
     }
     
-    xTaskCreate(connection_listener_task, "conn_listener", 4096, NULL, 5, &listener_task_handle);
-    xTaskCreate(connection_manager_task, "conn_manager", 4096, NULL, 5, &manager_task_handle);
-    xTaskCreate(message_io_task, "msg_io", 8192, NULL, 6, &io_task_handle);
-    xTaskCreate(self_message_handler_task, "self_handler", 8192, NULL, 6, &self_handler_task_handle);
+    if (xTaskCreate(connection_listener_task, "conn_listener", 4096, NULL, 5, &listener_task_handle) != pdPASS ||
+        xTaskCreate(connection_manager_task, "conn_manager", 4096, NULL, 5, &manager_task_handle) != pdPASS ||
+        xTaskCreate(message_io_task, "msg_io", 4608, NULL, 6, &io_task_handle) != pdPASS ||
+        xTaskCreate(self_message_handler_task, "self_handler", 4096, NULL, 6, &self_handler_task_handle) != pdPASS) {
+        ESP_LOGE(TAG, "Could not create the connection pool tasks (free heap %u, largest block %u).",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    }
     ESP_LOGI(TAG, "Unified connection pool service started for %d peers.", pool_size);
 }
 
@@ -577,7 +662,8 @@ void connection_pool_remove_peer(const char* ip_to_remove) {
 bool connection_pool_send(const char* target_ip, const char* message) {
     if (!outgoing_message_queue || !self_message_queue) return false;
     
-    outgoing_message_t *msg = malloc(sizeof(outgoing_message_t));
+    size_t msg_len = strnlen(message, MAX_MESSAGE_SIZE - 1);
+    outgoing_message_t *msg = malloc(sizeof(outgoing_message_t) + msg_len + 1);
     if (!msg) {
         ESP_LOGE(TAG, "Failed to allocate memory for outgoing message.");
         return false;
@@ -588,8 +674,8 @@ bool connection_pool_send(const char* target_ip, const char* message) {
 
         strncpy(msg->target_ip, target_ip, INET_ADDRSTRLEN - 1);
         msg->target_ip[INET_ADDRSTRLEN - 1] = '\0';
-        strncpy(msg->message, message, MAX_MESSAGE_SIZE - 1);
-        msg->message[MAX_MESSAGE_SIZE - 1] = '\0';
+        memcpy(msg->message, message, msg_len);
+        msg->message[msg_len] = '\0';
 
         if (xQueueSend(self_message_queue, &msg, pdMS_TO_TICKS(100)) != pdPASS) {
             ESP_LOGE(TAG, "Failed to queue self-message. Queue is full.");
@@ -601,8 +687,8 @@ bool connection_pool_send(const char* target_ip, const char* message) {
 
     strncpy(msg->target_ip, target_ip, INET_ADDRSTRLEN - 1);
     msg->target_ip[INET_ADDRSTRLEN - 1] = '\0';
-    strncpy(msg->message, message, MAX_MESSAGE_SIZE - 1);
-    msg->message[MAX_MESSAGE_SIZE - 1] = '\0';
+    memcpy(msg->message, message, msg_len);
+    msg->message[msg_len] = '\0';
     
     if (xQueueSend(outgoing_message_queue, &msg, pdMS_TO_TICKS(100)) != pdPASS) {
         ESP_LOGE(TAG, "Failed to queue message for %s. Queue is full.", target_ip);

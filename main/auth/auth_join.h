@@ -14,6 +14,10 @@
 #define MSG_JOIN_REQ "JOIN_REQ"
 #define MSG_JOIN_CHL "JOIN_CHL"
 #define MSG_JOIN_FINALIZE "JOIN_FINALIZE"
+// Part of the network state sent to a joining device before JOIN_FINALIZE (the state does not fit in one message).
+#define MSG_NET_STATE "NET_STATE"
+// Payload of a NET_STATE message, in characters.
+#define NET_STATE_CHUNK_SIZE 1400
 #define MSG_JOIN_RESPONSE "JOIN_RESPONSE"
 #define MSG_JOIN_FAIL_NO_VERIFIERS "JOIN_FAIL_NV"
 #define MSG_JOIN_ABORT "JOIN_ABORT"
@@ -27,14 +31,35 @@
 #define MSG_CHL_RESULT "CHL_RESULT"
 #define MSG_REQ_CHL_GEN "REQ_CHL_GEN"
 #define MSG_DELEGATE_CRPS "DELEGATE_CRPS"
+// (Leader -> intermediary) Asks a device that holds CRPs of both parties to give them the key of an enrollment.
+#define MSG_BROKER_REQ "BRK_REQ"
+// Marker of an enrollment whose responses travel encrypted.
+#define ENROLL_SECURE_MARKER '!'
+#define ENROLL_SEALED_PREFIX "ENC."
+#define ENROLL_NO_BROKER "-"
 
 #define MAX_JOIN_MSG 4096
 #define NONCE_SIZE 16
 #define NONCE_HEX_SIZE (NONCE_SIZE * 2 + 1)
-#define VERIFIER_PERCENTAGE 0.1f
+// Redundancy parameter rho: fraction of the devices assigned as Verifiers to each Prover, at join and at healing.
+#define VERIFIER_PERCENTAGE 0.3f
 #define MAX_VERIFIERS 32
+// A decision taken by the Verifiers of a device needs the majority of them.
+#define VERIFIER_QUORUM(n) ((n) / 2 + 1)
+// A device is excluded for good only if at least this many Verifiers agree.
+#define MIN_VERIFIERS_TO_EXCLUDE 2
 #define MAX_PARALLEL_HEALS 32
-#define MAX_CHALLENGES_PER_VERIFIER 5
+// CRPs that a Verifier holds for each of its Provers. A CRP is not consumed by its use, so one would be
+// enough; the second lets a Verifier repeat a failed check with another response before it reports the
+// Prover, so that a single response that is not reproduced does not cause a removal. More CRPs would only
+// use up the challenges of the PUF of the Prover (PUF_RESPONSE_CAPACITY), which bound how many times its
+// Verifiers can be replaced.
+#define CRPS_PER_VERIFIER 2
+// Time allowed to a device to accept a connection before it is given a role in a heal.
+#define DEVICE_PROBE_TIMEOUT_MS 1500
+// A commit acknowledged by the majority of the members is completed after this grace period even if some
+// members do not answer, e.g., because they failed and have not been removed yet.
+#define COMMIT_ACK_GRACE_MS 3000
 #define JOIN_PROCESS_TIMEOUT_MS 160000
 #define MAX_PENDING_JOINS 32
 #define SINGLE_VERIFIER_TIMEOUT_MS 30000
@@ -74,15 +99,24 @@ typedef struct {
     int expected_verifier_results;
     int received_verifier_results;
     int failed_verifier_results;
+    // Verifiers that reported a proof different from the reference, and Verifiers already counted.
+    int wrong_proof_results;
+    uint32_t reported_verifiers_mask;
 
     SemaphoreHandle_t ack_semaphore;
     SemaphoreHandle_t completion_semaphore;
 
     char verifier_ips[MAX_VERIFIERS][INET_ADDRSTRLEN]; 
     int verifier_count;
+    // For each verifier, the intermediary that gives it and the Prover the key of the enrollment
+    // (empty when the responses are enrolled as in the first enrollment of a device).
+    // Stored as IPv4 addresses (0 = none) to keep the table of parallel heals small.
+    uint32_t broker_addrs[MAX_VERIFIERS];
 
     int commit_ack_count;
     int expected_commit_acks;
+    // Time at which the majority of the members acknowledged the commit (0 until then).
+    uint32_t commit_majority_ms;
 } JoinProcess;
 
 /**
@@ -91,6 +125,18 @@ typedef struct {
  * It uses a lazy initialization pattern, creating the mutex only on its first required use.
  */
 void auth_join_init(void);
+
+/**
+ * @brief (Prover) Tells whether a challenge was just answered for a Verifier in an enrollment
+ * that is not committed yet, so that the Verifier can attest this device with it.
+ */
+bool join_is_pending_challenge(const char *verifier_ip, const char *challenge);
+
+/**
+ * @brief Tells whether this device is taking part in a join or a heal: as Coordinator of an
+ * operation that is not finished, or as Verifier of an enrollment that is not committed yet.
+ */
+bool auth_join_operation_in_progress(void);
 
 /**
  * @brief (Leader-only) Starts the network self-healing process.
@@ -181,5 +227,10 @@ void join_handle_message(char *message, const char *from_ip);
  * @return void
  */
 void auth_join_run_heal_job_async(join_request_t request);
+
+/**
+ * @brief Tells within a short time whether a device accepts connections on its attestation port.
+ */
+bool auth_join_device_reachable(const char *ip);
 
 #endif // AUTH_JOIN_H

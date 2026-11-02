@@ -6,6 +6,9 @@
 #ifndef AUTH_DB_H_
 #define AUTH_DB_H_
 
+// Response of a CRP staged during an enrollment, before the response of the Prover arrives.
+#define DB_PENDING_RESPONSE "PENDING"
+
 #include "cJSON.h"
 #include <stdbool.h>
 #include <arpa/inet.h>
@@ -14,7 +17,12 @@
 
 #define MAX_NODES 64
 #define MAX_CRP 50
-#define MAX_CNODE 200
+#define MAX_DISTINCT_VERIFIERS 32
+// Holder of a challenge whose Verifier was removed: the entry is kept so that the cells behind the
+// challenge are never assigned again.
+#define DB_REVOKED_HOLDER "0.0.0.0"
+// Entries of the network state: at most MAX_NODES devices with PUF_RESPONSE_CAPACITY challenges each.
+#define MAX_CNODE (MAX_NODES * 40)
 #define DB_NAMESPACE "auth_db"
 
 typedef struct {
@@ -144,6 +152,20 @@ void db_insert_cnode(const char *challenge, const char* target_ip, const char* h
 CRPNode* db_get_random_crp_for_node(const char* target_ip);
 
 /**
+ * @brief Copies the CRPs held for a node, starting from a random one.
+ * @param target_ip The IP address of the node.
+ * @param out Array that receives the CRPs.
+ * @param max Size of the array.
+ * @return The number of CRPs copied.
+ */
+int db_get_crps_for_node(const char *target_ip, CRPNode *out, int max);
+
+/**
+ * @brief (Debug profile) Logs the storage used by the network state and the shards.
+ */
+void db_log_storage(void);
+
+/**
  * @brief Retrieves a CRPNode by its challenge.
  * @param challenge The challenge string to search for.
  * @return Pointer to a dynamically allocated CRPNode. Caller must free this. Returns NULL if not found.
@@ -181,6 +203,17 @@ void db_import_nodes_json(const char* json_string);
 void db_import_cnode_json(const char *json);
 
 /**
+ * @brief Exports the whole network state for a joining device in a compact text form, with the entries
+ * of delta_json (a JSON array of {c, t, h}) appended. The caller frees the string.
+ */
+char *db_export_state_compact(const char *delta_json);
+
+/**
+ * @brief Replaces the network state with the one exported by db_export_state_compact.
+ */
+bool db_import_state_compact(const char *state);
+
+/**
  * @brief Removes all CRP entries associated with a given node IP.
  * @param target_ip The IP of the node whose CRPs should be removed.
  */
@@ -191,6 +224,12 @@ void db_remove_crp_for_node(const char* target_ip);
  * @param node_ip The IP of the node to remove from the CNode table.
  */
 void db_remove_cnode_for_node(const char* node_ip);
+
+/**
+ * @brief Moves to new_holder the entries in which self_ip is both Prover and Verifier, and returns their
+ * challenges (at most max). Used once, when the first Coordinator hands its credentials to the first device.
+ */
+int db_reassign_self_cnodes(const char *self_ip, const char *new_holder, char challenges[][64], int max);
 
 /**
  * @brief Removes a single node entry from the database by its IP.
@@ -266,6 +305,14 @@ char* db_join_tmp_export_cnodes_json(uint32_t transaction_id);
  * @return A pointer to a dynamically allocated CRPNode. Caller must free this. Returns NULL if not found.
  */
 CRPNode* db_join_tmp_get_crp_by_challenge(uint32_t transaction_id, const char *challenge);
+
+/**
+ * @brief (For Verifiers) Sets the response of a CRP staged in temporary storage.
+ * @param transaction_id The transaction ID.
+ * @param challenge The challenge of the staged CRP.
+ * @param new_response The response received from the Prover.
+ */
+void db_join_tmp_update_crp_response(uint32_t transaction_id, const char *challenge, const char *new_response);
 
 /**
  * @brief Retrieves a list of all current verifiers (holders) for a given target node.

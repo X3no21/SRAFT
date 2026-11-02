@@ -6,12 +6,14 @@
 # (see EMBED_TXTFILES in main/CMakeLists.txt) and that scripts/mqtts/
 # setup_mqtts_broker.sh installs on the broker:
 #
-#     main/certs/ca.crt      test CA certificate
-#     main/certs/device.crt  device/broker certificate signed by that CA
-#     main/certs/device.key  matching private key
+#     main/certs_local/ca.crt      test CA certificate
+#     main/certs_local/device.crt  device/broker certificate signed by that CA
+#     main/certs_local/device.key  matching private key
 #
-# The CA private key stays in scripts/tls/ca/ and is never copied into the
-# firmware tree. Both scripts/tls/ca/ and scripts/tls/certs/ are gitignored.
+# main/certs_local/ is gitignored; when it exists the build embeds it instead of
+# the placeholders tracked in main/certs/. The CA private key stays in
+# scripts/tls/ca/ and is never copied into the firmware tree. Both scripts/tls/ca/
+# and scripts/tls/certs/ are gitignored.
 #
 # The firmware disables common-name verification on both baselines, so a single
 # certificate is shared by every node and by the broker. The per-node mode below
@@ -29,7 +31,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-FIRMWARE_CERTS="$REPO_ROOT/main/certs"
+FIRMWARE_CERTS="$REPO_ROOT/main/certs_local"
 CA_DIR="$SCRIPT_DIR/ca"
 NODE_DIR_BASE="$SCRIPT_DIR/certs"
 
@@ -109,4 +111,4 @@ for f in ca.crt device.crt device.key; do
 done
 echo
 echo "Rebuild and reflash so the new material is embedded:  idf.py build flash"
-echo "WARNING: main/certs/ now holds real key material - do not commit it."
+echo "main/certs_local/ is gitignored; keep the placeholders in main/certs/ unchanged."

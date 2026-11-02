@@ -11,14 +11,25 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
+#include <string.h>
 
 static const char *TAG = "STATS_SAMPLER";
 
-static stats_sample_t stats_buffer[STATS_BUFFER_SIZE];
-static volatile uint32_t buffer_head = 0;
 static SemaphoreHandle_t buffer_mutex;
 
-static uint32_t checkpoint_stack[CHECKPOINT_STACK_SIZE];
+/**
+ * @brief Running aggregates of an open phase. Every sample taken while the phase is open is added to
+ * them, so that a phase of any length is measured over all its samples (a circular buffer of samples
+ * would lose the beginning of the phases longer than the buffer).
+ */
+typedef struct {
+    int count;
+    double sum_cpu, sum_mem, sum_pow;
+    double auc_cpu, auc_mem, auc_pow;
+    stats_sample_t last;   // last sample added, for the area under the curve
+} phase_acc_t;
+
+static phase_acc_t checkpoint_stack[CHECKPOINT_STACK_SIZE];
 static volatile int checkpoint_stack_top = -1;
 
 static portMUX_TYPE stats_sampler_init_spinlock = portMUX_INITIALIZER_UNLOCKED;
@@ -58,8 +69,52 @@ static float sample_cpu_usage(int core_id) {
 
     float idle_percentage = ((float)idle_time_diff / total_time_diff) * 100.0f;
     float cpu_usage = 100.0f - idle_percentage;
-    
+
     return (cpu_usage >= 0.0f) ? cpu_usage : 0.0f;
+}
+
+/**
+ * @brief Takes a sample. Must be called with buffer_mutex held, which also serializes the stateful
+ * CPU measurement of sample_cpu_usage().
+ * @details The CPU load of a sample is the one since the previous sample, whichever task took it.
+ */
+static stats_sample_t take_sample_locked(void) {
+    stats_sample_t sample;
+    sample.timestamp_ms = esp_timer_get_time() / 1000;
+
+    size_t total_heap = heap_caps_get_total_size(MALLOC_CAP_INTERNAL);
+    size_t free_heap = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    sample.memory_load_percent = (total_heap > 0) ? (100.0f * (total_heap - free_heap) / total_heap) : 0;
+
+    sample.cpu_usage_percent = sample_cpu_usage(0);
+
+    const float IDLE_CURRENT_MA = 44.0f;
+    const float MAX_CURRENT_MA = 239.0f;
+    float estimated_current_ma = IDLE_CURRENT_MA + ((MAX_CURRENT_MA - IDLE_CURRENT_MA) * (sample.cpu_usage_percent / 100.0f));
+    sample.estimated_power_mw = estimated_current_ma * ESP32_VOLTAGE_V;
+    return sample;
+}
+
+/**
+ * @brief Adds a sample to every open phase. Must be called with buffer_mutex held.
+ */
+static void add_sample_locked(const stats_sample_t *s) {
+    for (int i = 0; i <= checkpoint_stack_top; i++) {
+        phase_acc_t *p = &checkpoint_stack[i];
+        if (p->count > 0) {
+            double dt = (s->timestamp_ms - p->last.timestamp_ms) / 1000.0;
+            if (dt > 0) {
+                p->auc_cpu += (p->last.cpu_usage_percent + s->cpu_usage_percent) / 2.0 * dt;
+                p->auc_mem += (p->last.memory_load_percent + s->memory_load_percent) / 2.0 * dt;
+                p->auc_pow += (p->last.estimated_power_mw + s->estimated_power_mw) / 2.0 * dt;
+            }
+        }
+        p->sum_cpu += s->cpu_usage_percent;
+        p->sum_mem += s->memory_load_percent;
+        p->sum_pow += s->estimated_power_mw;
+        p->last = *s;
+        p->count++;
+    }
 }
 
 /**
@@ -70,24 +125,9 @@ static void stats_sampler_task(void *pvParameters) {
     ESP_LOGI(TAG, "Statistics sampling task started. Interval: %d ms.", SAMPLING_INTERVAL_MS);
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(SAMPLING_INTERVAL_MS));
-
-        stats_sample_t sample;
-        sample.timestamp_ms = esp_timer_get_time() / 1000;
-
-        size_t total_heap = heap_caps_get_total_size(MALLOC_CAP_INTERNAL);
-        size_t free_heap = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-        sample.memory_load_percent = (total_heap > 0) ? (100.0f * (total_heap - free_heap) / total_heap) : 0;
-
-        sample.cpu_usage_percent = sample_cpu_usage(0);
-        
-        const float IDLE_CURRENT_MA = 44.0f;
-        const float MAX_CURRENT_MA = 239.0f;
-        float estimated_current_ma = IDLE_CURRENT_MA + ((MAX_CURRENT_MA - IDLE_CURRENT_MA) * (sample.cpu_usage_percent / 100.0f));
-        sample.estimated_power_mw = estimated_current_ma * ESP32_VOLTAGE_V;
-
         xSemaphoreTake(buffer_mutex, portMAX_DELAY);
-        stats_buffer[buffer_head] = sample;
-        buffer_head = (buffer_head + 1) % STATS_BUFFER_SIZE;
+        stats_sample_t sample = take_sample_locked();
+        add_sample_locked(&sample);
         xSemaphoreGive(buffer_mutex);
     }
 }
@@ -120,24 +160,29 @@ void stats_sampler_init(void) {
 
 esp_err_t stats_sampler_start_phase(void) {
     xSemaphoreTake(buffer_mutex, portMAX_DELAY);
-    
+
     if (checkpoint_stack_top >= (CHECKPOINT_STACK_SIZE - 1)) {
         ESP_LOGE(TAG, "Checkpoint stack overflow! Cannot start new phase.");
         xSemaphoreGive(buffer_mutex);
         return ESP_FAIL;
     }
-    
+
+    // A sample taken now closes the interval before the phase: it goes to the phases already open, not
+    // to the new one, whose first sample (periodic or taken at its end) measures the CPU load from now.
+    stats_sample_t sample = take_sample_locked();
+    add_sample_locked(&sample);
+
     checkpoint_stack_top++;
-    checkpoint_stack[checkpoint_stack_top] = buffer_head;
-    
-    ESP_LOGI(TAG, "Phase started. Checkpoint created at index %lu, stack depth: %d", buffer_head, checkpoint_stack_top + 1);
+    memset(&checkpoint_stack[checkpoint_stack_top], 0, sizeof(phase_acc_t));
+
+    ESP_LOGI(TAG, "Phase started. Stack depth: %d", checkpoint_stack_top + 1);
 
     xSemaphoreGive(buffer_mutex);
     return ESP_OK;
 }
 
 /**
- * @brief Calculates aggregate statistics from the collected samples and clears the buffer.
+ * @brief Calculates aggregate statistics of the most recently started phase and ends it.
  */
 esp_err_t stats_sampler_end_phase_and_get_aggregates(aggregate_stats_t *results) {
     memset(results, 0, sizeof(aggregate_stats_t));
@@ -149,62 +194,26 @@ esp_err_t stats_sampler_end_phase_and_get_aggregates(aggregate_stats_t *results)
         return ESP_FAIL;
     }
 
-    uint32_t start_index = checkpoint_stack[checkpoint_stack_top];
+    // A sample taken now covers the end of the phase, so that a phase shorter than the sampling interval
+    // still has one sample, which measures exactly its duration.
+    stats_sample_t sample = take_sample_locked();
+    add_sample_locked(&sample);
+
+    phase_acc_t p = checkpoint_stack[checkpoint_stack_top];
     checkpoint_stack_top--;
-    
-    uint32_t end_index = buffer_head;
-    int sample_count = (end_index - start_index + STATS_BUFFER_SIZE) % STATS_BUFFER_SIZE;
-    
-    ESP_LOGI(TAG, "Phase ended. Calculating stats from index %lu to %lu (%d samples). Stack depth: %d", start_index, end_index, sample_count, checkpoint_stack_top + 1);
-
-    if (sample_count < 2) {
-        xSemaphoreGive(buffer_mutex);
-        results->sample_count = sample_count;
-        return ESP_FAIL;
-    }
-
-    stats_sample_t *local_samples = malloc(sample_count * sizeof(stats_sample_t));
-    if (local_samples == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate memory for local samples buffer!");
-        checkpoint_stack_top++;
-        xSemaphoreGive(buffer_mutex);
-        return ESP_FAIL;
-    }
-
-    for (int i = 0; i < sample_count; i++) {
-        local_samples[i] = stats_buffer[(start_index + i) % STATS_BUFFER_SIZE];
-    }
-    
     xSemaphoreGive(buffer_mutex);
 
-    results->sample_count = sample_count;
-    double sum_cpu = 0, sum_mem = 0, sum_pow = 0;
-    double auc_cpu = 0, auc_mem = 0, auc_pow = 0;
-
-    for (int i = 0; i < sample_count; i++) {
-        sum_cpu += local_samples[i].cpu_usage_percent;
-        sum_mem += local_samples[i].memory_load_percent;
-        sum_pow += local_samples[i].estimated_power_mw;
-    }
-    
-    for (int i = 0; i < sample_count - 1; i++) {
-        double delta_t_s = (local_samples[i+1].timestamp_ms - local_samples[i].timestamp_ms) / 1000.0;
-        if (delta_t_s < 0) continue;
-        
-        auc_cpu += (local_samples[i].cpu_usage_percent + local_samples[i+1].cpu_usage_percent) / 2.0 * delta_t_s;
-        auc_mem += (local_samples[i].memory_load_percent + local_samples[i+1].memory_load_percent) / 2.0 * delta_t_s;
-        auc_pow += (local_samples[i].estimated_power_mw + local_samples[i+1].estimated_power_mw) / 2.0 * delta_t_s;
+    ESP_LOGI(TAG, "Phase ended with %d samples. Stack depth: %d", p.count, checkpoint_stack_top + 1);
+    results->sample_count = p.count;
+    if (p.count < 1) {
+        return ESP_FAIL;
     }
 
-    results->avg_cpu = sum_cpu / sample_count;
-    results->avg_memory = sum_mem / sample_count;
-    results->avg_power = sum_pow / sample_count;
-    
-    results->auc_cpu = auc_cpu;
-    results->auc_memory = auc_mem;
-    results->auc_power = auc_pow;
-    
-    free(local_samples);
-    
+    results->avg_cpu = p.sum_cpu / p.count;
+    results->avg_memory = p.sum_mem / p.count;
+    results->avg_power = p.sum_pow / p.count;
+    results->auc_cpu = p.auc_cpu;
+    results->auc_memory = p.auc_mem;
+    results->auc_power = p.auc_pow;
     return ESP_OK;
 }

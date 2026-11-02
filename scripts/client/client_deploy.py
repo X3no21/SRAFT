@@ -11,11 +11,11 @@ if scripts_path not in sys.path:
 
 from utils.utils import copy_firmware_to_raspberry
 
-RASPBERRY_USER = "raspberrypi5"
-RASPBERRY_PI_IP  = "iotlabvr.ddns.net"
+RASPBERRY_USER = "pi"
+RASPBERRY_PI_IP  = "raspberrypi.local"
 DEPLOY_SERVER_URL = f"http://{RASPBERRY_PI_IP}:8000"
 BUILD_DIR = "build"
-RASPBERRY_DIR = "/home/raspberrypi5/firmware"
+RASPBERRY_DIR = "/home/pi/firmware"
 TMP_FOLDER = "tmp_firmware"
 
 def build_firmware():

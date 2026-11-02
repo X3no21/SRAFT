@@ -1,0 +1,11 @@
+{
+  "experimental_results/statistics/raw_authentication_sraft.csv": "a0bf2eba76eaade9e0268daa302dec1692946c38a4253c9dc6792aa9c33b81de",
+  "experimental_results/statistics/raw_authentication_tls.csv": "01c99b10fa0709a6a5f2cc7280ec44148629dc26ffdf0c880f39c4f5a80401f5",
+  "experimental_results/statistics/raw_authentication_mqtts.csv": "82cfea9a4d394add3eaab668247e1ac1bb22dd17ec2fb422a07753807dfe8fd6",
+  "experimental_results/statistics/raw_election.csv": "4795331743ddd8836237e8dad9ce1bcc68ecbcf852f86cae7f24ac1ba4f57a6a",
+  "experimental_results/statistics/raw_join.csv": "69099ce4f345f5135a0042507ab810b66f4462f7a85c2710fe2409cfc4790292",
+  "experimental_results/statistics/raw_removal.csv": "3565a3032ea325749fc9ba9fede8ee02ae07c64149ac357e908e39e9504bfcbd",
+  "experimental_results/statistics/raw_healing.csv": "2e61230bc2cde65b493c054ff9b4ea1a6ae1ea44f09f7189938abeee283f60fc",
+  "experimental_results/statistics/faults_raw.csv": "70e5e69e298e6757fef191da08bb80af66ecb77a35ab155057c703e5e7841ea3",
+  "experimental_results/statistics/attestation_7_nodes/attestation_per_device.csv": "f8c70b94f358d493379296798f3ec3d728d21abad81242b75a01ce2efb4c47a7"
+}

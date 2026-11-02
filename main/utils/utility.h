@@ -13,9 +13,17 @@
 #define MONITORING_SERVER_IP "192.168.1.125"
 #define MONITORING_PORT 9001
 
-#define SRAM_PUF_SIZE_WORDS 256
+// The SRAM PUF uses the first 4 KB of the RTC slow memory, i.e., 32768 cells.
+#define SRAM_PUF_SIZE_WORDS 1024
+// Readings taken once, at provisioning, to build the stability mask. The cells that still differ
+// between power-ups after this filter are corrected by the fuzzy extractor.
 #define SRAM_PUF_READOUTS 5
-#define RESPONSE_BITS 32
+#define RESPONSE_BITS 128
+// Number of response indexes that the Coordinator may assign to a device. It is a lower bound on
+// what the retained cells of a device provide (see PUF_BLOCKS_PER_RESPONSE).
+#define PUF_RESPONSE_CAPACITY 40
+// Prefix of a challenge: "<prefix><response index>@<device identifier>".
+#define PUF_CHALLENGE_PREFIX "P"
 
 /**
  * @brief Initializes the SNTP client and blocks until the system time is synchronized.
@@ -90,6 +98,15 @@ void init_sram_puf(void);
 void simulate_puf_response(const uint8_t *challenge, size_t challenge_len, char *response);
 
 /**
+ * @brief Builds the challenge string that addresses a response index of a device.
+ * @param response_index The index of the group of cells, in [0, PUF_RESPONSE_CAPACITY).
+ * @param device_id The identifier of the device the challenge is for.
+ * @param challenge Output buffer.
+ * @param challenge_size The size of the output buffer.
+ */
+void puf_format_challenge(int response_index, const char *device_id, char *challenge, size_t challenge_size);
+
+/**
  * @brief Thread-safely retrieves the current node's IPv4 address as a string.
  * @param ip_buf A character buffer to store the retrieved IP address.
  * @param buf_size The size of the provided ip_buf.
@@ -147,5 +164,15 @@ void hex_to_bytes(const char* src, uint8_t* dest, size_t size);
  * @return A securely generated random number as a uint32_t between 0 and max-1.
  */
 uint32_t secure_rand_range(uint32_t max);
+
+/**
+ * @brief Logs the free internal heap and its largest free block, with a label (for diagnostics).
+ */
+void log_heap(const char *where);
+
+/**
+ * @brief Logs, for every task, the smallest amount of stack it has left so far (for diagnostics).
+ */
+void log_task_stacks(void);
 
 #endif // UTILITY_H

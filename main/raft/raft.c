@@ -4,6 +4,7 @@
  * ============================= */
 
 #include "raft.h"
+#include "esp_heap_caps.h"
 #include "raft_state.h"
 #include "connection_pool.h"
 #include "utility.h"
@@ -345,6 +346,8 @@ static void raft_worker_task(void *pvParameters) {
             if (strncmp(msg->message, MSG_REQUEST_INTEGRITY_CHECK, strlen(MSG_REQUEST_INTEGRITY_CHECK)) == 0 || 
                 strncmp(msg->message, MSG_PROCEED_WITH_INTEGRITY_CHECK, strlen(MSG_PROCEED_WITH_INTEGRITY_CHECK)) == 0) {
                 integrity_verification_handle_message(msg->message, msg->from_ip);
+            } else if (strncmp(msg->message, MSG_REMOVE_PREFIX, strlen(MSG_REMOVE_PREFIX)) == 0) {
+                remove_handle_message(msg->message, msg->from_ip);
             } else if (strncmp(msg->message, MSG_NODE_REMOVED_ACK, strlen(MSG_NODE_REMOVED_ACK)) == 0) {
                  char *removed_node_ip = strchr(msg->message, ':');
                 if (removed_node_ip != NULL && strlen(removed_node_ip) > 1) {
@@ -400,12 +403,18 @@ static void queue_for_worker(char *message, const char *from_ip) {
  * @param from_ip The IP address of the node that sent the message.
  * @param message The null-terminated message string.
  */
+static bool is_from_leader(const char *from_ip) {
+    char leader_ip[INET_ADDRSTRLEN];
+    return raft_state_get_leader_info(leader_ip, sizeof(leader_ip), NULL, 0) && strcmp(from_ip, leader_ip) == 0;
+}
+
 void raft_message_handler(const char* from_ip, const char* message) {
     bool is_join_protocol_message = 
         strncmp(message, MSG_JOIN_FAIL_MASTER_CORRUPT, strlen(MSG_JOIN_FAIL_MASTER_CORRUPT)) == 0 ||
         strncmp(message, MSG_JOIN_REQ, strlen(MSG_JOIN_REQ)) == 0 ||
         strncmp(message, MSG_JOIN_CHL, strlen(MSG_JOIN_CHL)) == 0 ||
         strncmp(message, MSG_JOIN_FINALIZE, strlen(MSG_JOIN_FINALIZE)) == 0 ||
+        strncmp(message, MSG_NET_STATE, strlen(MSG_NET_STATE)) == 0 ||
         strncmp(message, MSG_JOIN_RESPONSE, strlen(MSG_JOIN_RESPONSE)) == 0 ||
         strncmp(message, MSG_JOIN_FAIL_NO_VERIFIERS, strlen(MSG_JOIN_FAIL_NO_VERIFIERS)) == 0 ||
         strncmp(message, MSG_JOIN_ABORT, strlen(MSG_JOIN_ABORT)) == 0 ||
@@ -446,11 +455,18 @@ void raft_message_handler(const char* from_ip, const char* message) {
     buffer_copy[MAX_MESSAGE_SIZE - 1] = '\0';
 
     if (sscanf(message, "RV %lu %15s %17s %lu %lu", &rpc_term, ip_str, mac_str, &rpc_lli, &rpc_llt) == 5) {
+        // The election messages are accepted only from the device they name.
+        if (strcmp(from_ip, ip_str) != 0) {
+            ESP_LOGW(TAG, "%s from %s names another device (%s). Ignored.", MSG_REQUEST_VOTE, from_ip, ip_str);
+            free(buffer_copy);
+            return;
+        }
         bool vote_was_granted = raft_state_handle_request_vote(rpc_term, ip_str, mac_str, rpc_lli, rpc_llt);
         if (vote_was_granted) {
             char *reply_msg = malloc(MAX_MESSAGE_SIZE);
             if (!reply_msg) {
                 ESP_LOGE(TAG, "Failed to allocate memory for message copy in raft handler.");
+                free(buffer_copy);
                 return;
             }
             snprintf(reply_msg, MAX_MESSAGE_SIZE, "%s %lu %s\n", MSG_VOTE_GRANTED, raft_state_get_current_term(), my_ip);
@@ -458,12 +474,38 @@ void raft_message_handler(const char* from_ip, const char* message) {
             free(reply_msg);
         }
         free(buffer_copy);
+    } else if (strncmp(message, MSG_BLACKLIST_ADD "|", strlen(MSG_BLACKLIST_ADD) + 1) == 0) {
+        // Only the Coordinator excludes devices for the whole network. A device that does not know
+        // the Coordinator yet accepts the list from one of its peers.
+        char leader_ip[INET_ADDRSTRLEN];
+        bool has_leader = raft_state_get_leader_info(leader_ip, sizeof(leader_ip), NULL, 0);
+        bool sender_allowed = has_leader ? (strcmp(from_ip, leader_ip) == 0) : raft_state_is_peer(from_ip);
+
+        char *saveptr;
+        strtok_r(buffer_copy, "|", &saveptr);
+        char *mac = strtok_r(NULL, "|", &saveptr);
+        char *bl_nonce = strtok_r(NULL, "|\r\n", &saveptr);
+        if (sender_allowed && mac && bl_nonce && strlen(mac) < MAC_ADDR_STR_LEN && nonce_is_valid_and_store(bl_nonce)) {
+            raft_state_blacklist_mac(mac);
+        } else {
+            ESP_LOGW(TAG, "%s from %s ignored.", MSG_BLACKLIST_ADD, from_ip);
+        }
+        free(buffer_copy);
     } else if (sscanf(message, "HB %lu %15s %17s", &rpc_term, ip_str, mac_str) == 3 || sscanf(message, "LI %lu %15s %17s", &rpc_term, ip_str, mac_str) == 3) {
-        raft_state_handle_heartbeat(rpc_term, ip_str, mac_str);
+        if (strcmp(from_ip, ip_str) == 0) {
+            raft_state_handle_heartbeat(rpc_term, ip_str, mac_str);
+        } else {
+            ESP_LOGW(TAG, "Heartbeat from %s names another Coordinator (%s). Ignored.", from_ip, ip_str);
+        }
         free(buffer_copy);
     } else if (sscanf(message, "VG %lu %15s", &rpc_term, ip_str) == 2) {
-        if (raft_state_get_state() == CANDIDATE && rpc_term == raft_state_get_current_term()) {
-            int new_vote_count = raft_state_increment_vote_count();
+        if (raft_state_get_state() == CANDIDATE && rpc_term == raft_state_get_current_term() && strcmp(from_ip, ip_str) == 0) {
+            int new_vote_count = raft_state_record_vote(from_ip);
+            if (new_vote_count < 0) {
+                ESP_LOGW(TAG, "Vote of %s for term %lu already counted. Ignored.", from_ip, rpc_term);
+                free(buffer_copy);
+                return;
+            }
             int peer_count = 0;
             char **peers = raft_state_get_peers_copy(&peer_count);
             int majority = 0;
@@ -492,6 +534,7 @@ void raft_message_handler(const char* from_ip, const char* message) {
         } else if (strncmp(message, MSG_JOIN_REQ, strlen(MSG_JOIN_REQ)) == 0 ||
                    strncmp(message, MSG_JOIN_CHL, strlen(MSG_JOIN_CHL)) == 0 ||
                    strncmp(message, MSG_JOIN_FINALIZE, strlen(MSG_JOIN_FINALIZE)) == 0 ||
+                   strncmp(message, MSG_NET_STATE, strlen(MSG_NET_STATE)) == 0 ||
                    strncmp(message, MSG_JOIN_RESPONSE, strlen(MSG_JOIN_RESPONSE)) == 0 ||
                    strncmp(message, MSG_JOIN_ABORT, strlen(MSG_JOIN_ABORT)) == 0 ||
                    strncmp(message, MSG_JOIN_FAIL_MASTER_CORRUPT, strlen(MSG_JOIN_FAIL_MASTER_CORRUPT)) == 0 ||
@@ -504,10 +547,12 @@ void raft_message_handler(const char* from_ip, const char* message) {
                    strncmp(message, MSG_NODE_ADDED_COMMIT, strlen(MSG_NODE_ADDED_COMMIT)) == 0 ||
                    strncmp(message, MSG_NODE_HEALED_COMMIT, strlen(MSG_NODE_HEALED_COMMIT)) == 0 ||
                    strncmp(message, MSG_COMMIT_ACK, strlen(MSG_COMMIT_ACK)) == 0 ||
-                   strncmp(message, MSG_CLEANUP_COMMIT, strlen(MSG_CLEANUP_COMMIT)) == 0) {
+                   strncmp(message, MSG_CLEANUP_COMMIT, strlen(MSG_CLEANUP_COMMIT)) == 0 ||
+                   strncmp(message, MSG_BROKER_REQ, strlen(MSG_BROKER_REQ)) == 0) {
 
             queue_for_worker(buffer_copy, from_ip);
-        } else if (strncmp(message, MSG_NODE_REMOVED_ACK, strlen(MSG_NODE_REMOVED_ACK)) == 0) {
+        } else if (strncmp(message, MSG_NODE_REMOVED_ACK, strlen(MSG_NODE_REMOVED_ACK)) == 0 ||
+                   strncmp(message, MSG_REMOVE_PREFIX, strlen(MSG_REMOVE_PREFIX)) == 0) {
             queue_for_worker(buffer_copy, from_ip);
         } else if (strncmp(message, MSG_NODE_REMOVED, strlen(MSG_NODE_REMOVED)) == 0 || 
                    strncmp(message, MSG_NODE_REMOVE_ABORT, strlen(MSG_NODE_REMOVE_ABORT)) == 0 ||
@@ -518,12 +563,19 @@ void raft_message_handler(const char* from_ip, const char* message) {
         } else if (strncmp(message, MSG_AUTH_REQ, strlen(MSG_AUTH_REQ)) == 0 || 
                    strncmp(message, MSG_AUTH_RESPONSE, strlen(MSG_AUTH_RESPONSE)) == 0 || 
                    strncmp(message, MSG_INITIATE_AUTH_REQ, strlen(MSG_INITIATE_AUTH_REQ)) == 0 || 
-                   strncmp(message, MSG_AUTH_FINAL_RESULT, strlen(MSG_AUTH_FINAL_RESULT)) == 0) {
+                   strncmp(message, MSG_AUTH_FINAL_RESULT, strlen(MSG_AUTH_FINAL_RESULT)) == 0 ||
+                   strncmp(message, MSG_ENROLL_KEY, strlen(MSG_ENROLL_KEY)) == 0) {
 
             auth_puf_queue_message(buffer_copy, from_ip);
         } else if (sscanf(message, MSG_PAUSE_HB_TIMERS ":%lu:%s", &rpc_term, nonce) == 2) {
+            if (!is_from_leader(from_ip)) {
+                ESP_LOGW(TAG, "%s from non-Coordinator %s ignored.", MSG_PAUSE_HB_TIMERS, from_ip);
+                free(buffer_copy);
+                return;
+            }
             if (!nonce_is_valid_and_store(nonce)) {
                 ESP_LOGW(TAG, "%s command from %s ignored due to invalid or replayed nonce.", MSG_PAUSE_HB_TIMERS, from_ip);
+                free(buffer_copy);
                 return;
             }
 
@@ -538,8 +590,14 @@ void raft_message_handler(const char* from_ip, const char* message) {
             }
             free(buffer_copy);
         } else if (sscanf(message, MSG_RESUME_HB_TIMERS ":%lu:%s", &rpc_term, nonce) == 2) {
+            if (!is_from_leader(from_ip)) {
+                ESP_LOGW(TAG, "%s from non-Coordinator %s ignored.", MSG_RESUME_HB_TIMERS, from_ip);
+                free(buffer_copy);
+                return;
+            }
             if (!nonce_is_valid_and_store(nonce)) {
                 ESP_LOGW(TAG, "%s command from %s ignored due to invalid or replayed nonce.", MSG_RESUME_HB_TIMERS, from_ip);
+                free(buffer_copy);
                 return;
             }
 
@@ -597,14 +655,19 @@ void raft_init_with_peers(char **peers, int num_peers) {
     
     if (!raft_worker_queue) {
         raft_worker_queue = xQueueCreate(10, sizeof(raft_worker_msg_t));
-        xTaskCreate(raft_worker_task, "raft_worker", 8192, NULL, 6, NULL);
+        xTaskCreate(raft_worker_task, "raft_worker", 5120, NULL, 6, NULL);
     }
 
     xTimerStart(local_heartbeat_timer, 0);
-    xTaskCreate(&raft_orchestrator_task, "raft_orchestrator", 4096, NULL, 7, &raft_orchestrator_task_handle);
+    if (xTaskCreate(&raft_orchestrator_task, "raft_orchestrator", 4096, NULL, 7, &raft_orchestrator_task_handle) != pdPASS) {
+        ESP_LOGE(TAG, "RAFT init failed: could not create the orchestrator task (free heap %u, largest block %u).",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+        return;
+    }
 
     is_raft_initialized = true;
-    ESP_LOGI(TAG, "RAFT logic initialized successfully.");
+    ESP_LOGI(TAG, "RAFT logic initialized successfully. Free heap %u, largest block %u.",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 }
 
 /**
@@ -617,4 +680,46 @@ void raft_init_with_peers(char **peers, int num_peers) {
 void raft_force_new_election(void) {
     ESP_LOGW(TAG, "An external module is forcing a new election.");
     notify_orchestrator();
+}
+
+/**
+ * @brief (Internal) Builds the message that excludes a device.
+ */
+static void format_blacklist_msg(const char *mac, char *msg, size_t msg_size) {
+    char nonce_hex[NONCE_HEX_SIZE];
+    uint8_t nonce[NONCE_SIZE];
+    generate_nonce(nonce, NONCE_SIZE);
+    bytes_to_hex(nonce, nonce_hex, NONCE_SIZE);
+    snprintf(msg, msg_size, "%s|%s|%s\n", MSG_BLACKLIST_ADD, mac, nonce_hex);
+}
+
+void raft_broadcast_blacklist_entry(const char *mac) {
+    int peer_count = 0;
+    char **peers = raft_state_get_peers_copy(&peer_count);
+    if (!peers) return;
+
+    char my_ip[INET_ADDRSTRLEN];
+    raft_state_get_self_info(my_ip, sizeof(my_ip), NULL, 0);
+    for (int i = 0; i < peer_count; i++) {
+        if (strcmp(peers[i], my_ip) != 0) {
+            char msg[96];
+            format_blacklist_msg(mac, msg, sizeof(msg));
+            connection_pool_send(peers[i], msg);
+        }
+        free(peers[i]);
+    }
+    free(peers);
+}
+
+void raft_send_blacklist_to(const char *target_ip) {
+    char (*macs)[MAC_ADDR_STR_LEN] = malloc(MAX_BLACKLIST * MAC_ADDR_STR_LEN);
+    if (!macs) return;
+
+    int count = raft_state_get_blacklist(macs, MAX_BLACKLIST);
+    for (int i = 0; i < count; i++) {
+        char msg[96];
+        format_blacklist_msg(macs[i], msg, sizeof(msg));
+        connection_pool_send(target_ip, msg);
+    }
+    free(macs);
 }

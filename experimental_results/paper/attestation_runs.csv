@@ -1,0 +1,2 @@
+scenario,network_size,metric,n,mean,std,ci95_low,ci95_high
+attestation,7,duration_s,10,1.7717523809523807,0.09545945386299684,1.7034648013912979,1.8400399605134636

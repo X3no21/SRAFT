@@ -1,0 +1,13 @@
+{
+  "fault": "tamper",
+  "faulty_devices": 1,
+  "coordinator_included": true,
+  "network_size": 9,
+  "times": {
+    "new_coordinator_s": 89.9,
+    "removed_s": 121.7,
+    "restored_s": 121.7
+  },
+  "authenticated_after": 8,
+  "survivors": 8
+}

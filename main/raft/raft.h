@@ -63,4 +63,16 @@ void raft_force_new_election(void);
  */
 bool is_raft_running(void);
 
+/**
+ * @brief (Coordinator) Tells all the other devices that a device is excluded.
+ * @param mac The MAC address of the excluded device.
+ */
+void raft_broadcast_blacklist_entry(const char *mac);
+
+/**
+ * @brief (Coordinator) Sends the whole list of excluded devices to one device, e.g., a new member.
+ * @param target_ip The IP address of the device that receives the list.
+ */
+void raft_send_blacklist_to(const char *target_ip);
+
 #endif // RAFT_H

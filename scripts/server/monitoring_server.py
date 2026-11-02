@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import threading
 import time
@@ -6,6 +7,7 @@ import socket
 from datetime import datetime, timezone, timedelta
 from contextlib import asynccontextmanager
 import requests
+from concurrent.futures import ThreadPoolExecutor
 import uvicorn
 import pandas as pd
 from fastapi import FastAPI, HTTPException
@@ -31,7 +33,7 @@ LOG_PORT_TCP = 9001
 API_PORT_HTTP = 9002
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
-    "postgresql://raft:CHANGE_ME@localhost/logger_db",
+    "postgresql+psycopg2://raft:CHANGE_ME@localhost/logger_db",
 )
 POLLING_INTERVAL_SECONDS = 0.5
 HEARTBEAT_TIMEOUT_SECONDS = 90
@@ -92,7 +94,7 @@ class AuthLog(Base):
     operation_id = Column(String, index=True)
     event = Column(String)
     authenticated_node_mac = Column(String)
-    auth_type = Column(String)  # "SRAFT" or "TLS"
+    auth_type = Column(String)  # "SRAFT", "TLS", "TLS_RESUMED", or "MQTTS"
 
 
 class ElectionStat(Base):
@@ -195,6 +197,32 @@ class BootstrapStat(Base):
     auc_memory_percent_seconds = Column(Float)
     auc_power_mw_seconds = Column(Float)
     
+class AttestLog(Base):
+    """Logs the start and the outcome of an attestation requested by the orchestrator (RQ1)."""
+    __tablename__ = "attest_logs"
+    id = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(DateTime(timezone=True))
+    campaign_id = Column(String)
+    operation_id = Column(String, index=True)
+    event = Column(String)
+    attested_node_mac = Column(String)
+    verifier_mac = Column(String)
+
+class AttestStat(Base):
+    """Stores system statistics polled during an attestation."""
+    __tablename__ = "attest_stats"
+    id = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(DateTime(timezone=True))
+    campaign_id = Column(String)
+    operation_id = Column(String)
+    node_mac = Column(String)
+    cpu_usage_percent = Column(Float)
+    memory_load_percent = Column(Float)
+    estimated_power_mw = Column(Float)
+    auc_cpu_percent_seconds = Column(Float)
+    auc_memory_percent_seconds = Column(Float)
+    auc_power_mw_seconds = Column(Float)
+
 class IntegrityFailureLog(Base):
     """Logs events related to integrity check failures."""
     __tablename__ = "integrity_failure_logs"
@@ -262,6 +290,11 @@ PHASE_CONFIG = {
         "stat_model": AuthStat,
         "end_events": ['SUCCESS', 'FAILURE'],
     },
+    "INTEGRITY_CHECK": {
+        "log_model": AttestLog,
+        "stat_model": AttestStat,
+        "end_events": ['SUCCESS', 'FAILURE'],
+    },
     "INTEGRITY_TEST": {
         "log_model": IntegrityFailureLog,
         "stat_model": ElectionStat,
@@ -272,7 +305,8 @@ PHASE_CONFIG = {
 phase_prefix_map = {
     "election_": "ELECTION", "join_": "JOIN", "remove_": "REMOVE",
     "heal_": "HEAL", "auth_": "AUTH", "bootstrap_": "BOOTSTRAP",
-    "healing_phase_": "HEALING_PHASE", "integrity_": "INTEGRITY_TEST"
+    "healing_phase_": "HEALING_PHASE", "integrity_": "INTEGRITY_TEST",
+    "attest_": "INTEGRITY_CHECK"
 }
 
 cluster_nodes = set()
@@ -437,6 +471,49 @@ def _try_process_end_event(session, job_data, current_online_nodes):
         session.rollback()
         return False
 
+# One single-thread executor per device: the requests to a device (start of a phase, then its statistics)
+# are sent in order, while different devices are served in parallel. A device that answers slowly, e.g.,
+# while it runs the operation being measured, delays only its own requests.
+NODE_HTTP_TIMEOUT = (3, 30)
+_node_executors = {}
+_node_executors_lock = threading.Lock()
+
+
+def _node_executor(node_ip: str) -> ThreadPoolExecutor:
+    with _node_executors_lock:
+        executor = _node_executors.get(node_ip)
+        if executor is None:
+            executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"node-{node_ip}")
+            _node_executors[node_ip] = executor
+        return executor
+
+
+def _post_start_phase(node_ip: str, attempts: int = 3):
+    # A start that is not delivered would make the next end of phase on this device close the wrong phase, so
+    # it is retried (on the executor of the device, before any later request to it) when the connection
+    # failed. A read timeout is not retried: the device received the request, and a second one would open
+    # the phase twice.
+    for attempt in range(1, attempts + 1):
+        try:
+            requests.post(f"http://{node_ip}:{ESP32_API_PORT}/system/stats/start_phase", timeout=NODE_HTTP_TIMEOUT)
+            return
+        except requests.exceptions.ReadTimeout as e:
+            logger.warning(f"start_phase on node {node_ip} sent but not answered in time (not retried): {e}")
+            return
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"Could not trigger start_phase on node {node_ip} (attempt {attempt}/{attempts}): {e}")
+
+
+def _get_phase_stats(node_ip: str):
+    """Ends the current phase on a device and returns its aggregates, or None."""
+    try:
+        response = requests.get(f"http://{node_ip}:{ESP32_API_PORT}/system/stats", timeout=NODE_HTTP_TIMEOUT)
+        return response.json() if response.status_code == 200 else None
+    except (requests.exceptions.RequestException, ValueError) as e:
+        logger.error(f"Could not contact node {node_ip} for stats: {e}")
+        return None
+
+
 def _async_log_stats_worker(operation_id: str, model_class, nodes_to_query: list, campaign_id_override: str = None):
     """
     At the end of a phase, queries all online nodes for their aggregate stats
@@ -462,43 +539,32 @@ def _async_log_stats_worker(operation_id: str, model_class, nodes_to_query: list
         if not nodes_to_query:
             return
 
-        for node_ip in nodes_to_query:
+        # The statistics of all the devices are requested in parallel, each after the requests already queued
+        # for that device (in particular the start of this phase).
+        futures = {node_ip: _node_executor(node_ip).submit(_get_phase_stats, node_ip) for node_ip in nodes_to_query}
+        for node_ip, future in futures.items():
             node_mac = ip_mac_map.get(node_ip)
             if not node_mac:
                 logger.warning(f"[{campaign_id} | {operation_id}] No MAC found for IP {node_ip}. Skipping stats log.")
                 continue
-            try:
-                response = requests.get(f"http://{node_ip}:{ESP32_API_PORT}/system/stats")
-
-                if response.status_code == 200:
-                    stats = response.json()
-                    cpu_stats = stats.get('cpu', {})
-                    mem_stats = stats.get('memory', {})
-                    pow_stats = stats.get('power', {})
-
-                    new_stat_entry = model_class(
-                        timestamp=measurement_timestamp,
-                        campaign_id=campaign_id,
-                        operation_id=operation_id,
-                        node_mac=node_mac,
-                        cpu_usage_percent=cpu_stats.get('average_percent', 0.0),
-                        memory_load_percent=mem_stats.get('average_percent', 0.0),
-                        estimated_power_mw=pow_stats.get('average_mw', 0.0),
-                        auc_cpu_percent_seconds=cpu_stats.get('auc_percent_seconds', 0.0),
-                        auc_memory_percent_seconds=mem_stats.get('auc_percent_seconds', 0.0),
-                        auc_power_mw_seconds=pow_stats.get('auc_mw_seconds', 0.0)
-                    )
-                    session.add(new_stat_entry)
-                    # logger.success(f"Logged stats for node {node_ip} in op {operation_id}")
-                elif response.status_code == 204:
-                    pass
-                    # logger.warning(f"Node {node_ip} had no new stats to report for op {operation_id} (204 No Content)")
-                else:
-                    pass
-                    # logger.warning(f"Failed to get stats from {node_ip} for op {operation_id}: Status {response.status_code}")
-
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Could not contact node {node_ip} for stats during op {operation_id}: {e}")
+            stats = future.result()
+            if not stats:
+                continue
+            cpu_stats = stats.get('cpu', {})
+            mem_stats = stats.get('memory', {})
+            pow_stats = stats.get('power', {})
+            session.add(model_class(
+                timestamp=measurement_timestamp,
+                campaign_id=campaign_id,
+                operation_id=operation_id,
+                node_mac=node_mac,
+                cpu_usage_percent=cpu_stats.get('average_percent', 0.0),
+                memory_load_percent=mem_stats.get('average_percent', 0.0),
+                estimated_power_mw=pow_stats.get('average_mw', 0.0),
+                auc_cpu_percent_seconds=cpu_stats.get('auc_percent_seconds', 0.0),
+                auc_memory_percent_seconds=mem_stats.get('auc_percent_seconds', 0.0),
+                auc_power_mw_seconds=pow_stats.get('auc_mw_seconds', 0.0)
+            ))
 
         session.commit()
     except Exception as e:
@@ -535,16 +601,17 @@ def log_end_of_phase_stats(operation_id: str, model_class, nodes_to_query: list,
             active_worker_threads.remove(t)
             
 def _trigger_start_phase_on_all_nodes():
-    """Helper function to call /system/stats/start_phase on all online nodes."""
+    """
+    Starts a phase on all online nodes. The requests are queued on the executor of each node and sent in
+    parallel, so that the caller (which then logs the start of the operation) is not delayed by a node
+    that answers slowly.
+    """
     with state_lock:
         nodes_to_query = list(cluster_nodes)
 
     for node_ip in nodes_to_query:
-        try:
-            requests.post(f"http://{node_ip}:{ESP32_API_PORT}/system/stats/start_phase")
-        except requests.exceptions.RequestException:
-            logger.warning(f"Could not trigger start_phase on node {node_ip}")
-            
+        _node_executor(node_ip).submit(_post_start_phase, node_ip)
+
 def retry_worker_thread():
     """
     Periodically retries processing end-phase events that failed 
@@ -628,10 +695,12 @@ def parse_and_log_message(message: str, from_ip: str, conn: socket.socket = None
             timestamp = datetime.now(timezone.utc)
             
         clean_message = payload.strip()
-        if ':' in clean_message:
-            parts = clean_message.split(':', 1)
-            event_name = parts[0]
-            data = parts[1]
+        # The event name ends at the first ':' or '|': events such as AUTH_START separate their fields
+        # with '|' and carry MAC addresses, which contain ':'.
+        name_match = re.match(r'([A-Za-z_]+)([:|])(.*)', clean_message, re.S)
+        if name_match:
+            event_name = name_match.group(1)
+            data = name_match.group(3)
         else:
             event_name = clean_message
             data = ""
@@ -889,6 +958,41 @@ def parse_and_log_message(message: str, from_ip: str, conn: socket.socket = None
             else:
                 logger.warning(f"Malformed AUTH_RESULT_EVENT from {from_ip}")
             
+        elif event_name == 'ATTEST_START':
+            # Format: ATTEST_START|<op_id>|<attested mac>, sent by the Verifier
+            parts = data.split('|')
+            if len(parts) >= 2:
+                op_id, node_mac = parts[0], parts[1].upper()
+                _trigger_start_phase_on_all_nodes()
+                session.add(AttestLog(
+                    timestamp=timestamp,
+                    campaign_id=campaign_id,
+                    event='START',
+                    attested_node_mac=node_mac,
+                    verifier_mac=reporter_mac,
+                    operation_id=op_id
+                ))
+                session.commit()
+            else:
+                logger.warning(f"Malformed ATTEST_START from {from_ip}")
+
+        elif event_name == 'ATTEST_RESULT_EVENT':
+            # Format: ATTEST_RESULT_EVENT|<result>|<op_id>|<attested mac>
+            parts = data.split('|')
+            if len(parts) >= 3:
+                result_flag, op_id, node_mac = parts[0], parts[1], parts[2].upper()
+                session.add(AttestLog(
+                    timestamp=timestamp,
+                    campaign_id=campaign_id,
+                    event='SUCCESS' if result_flag == '1' else 'FAILURE',
+                    attested_node_mac=node_mac,
+                    verifier_mac=reporter_mac,
+                    operation_id=op_id
+                ))
+                log_end_of_phase_stats(op_id, AttestStat, nodes_to_query=current_online_nodes)
+            else:
+                logger.warning(f"Malformed ATTEST_RESULT_EVENT from {from_ip}")
+
         elif event_name == 'JOIN_VERIFIERS':
             try:
                 parts = data.split(':', 1)
@@ -960,7 +1064,7 @@ def parse_and_log_message(message: str, from_ip: str, conn: socket.socket = None
 
         if event_name not in [
             'HEAL_START', 'JOIN_START', 'SET_CAMPAIGN', 'JOIN_VERIFIERS',
-            'REMOVE_START', 'HEALING_PHASE_START', 'AUTH_START', 'BOOTSTRAP_START',
+            'REMOVE_START', 'HEALING_PHASE_START', 'AUTH_START', 'ATTEST_START', 'BOOTSTRAP_START',
             'JOIN_COMPLETE', 'JOIN_FAILED', 'REMOVE_COMPLETE', 
             'HEALING_PHASE_COMPLETE', 'HEALING_PHASE_FAILED',
             'HEAL_COMPLETE', 'HEAL_FAILED', 'INTEGRITY_CHECK_FAILED'
@@ -1087,8 +1191,10 @@ def _generate_summary_for_phase(db: Session, campaign_id: str, type: str, log_mo
         if current_op_id_type != type:
             continue
         
-        start_log = db.query(log_model).filter(log_model.operation_id == op_id, log_model.event.ilike('%START%')).order_by(log_model.timestamp.asc()).first()
-        end_log = db.query(log_model).filter(log_model.operation_id == op_id, log_model.event.in_(end_events)).order_by(log_model.timestamp.desc()).first()
+        # Operation identifiers (e.g. election_<term>) repeat across campaigns, so every query is
+        # restricted to the campaign.
+        start_log = db.query(log_model).filter(log_model.campaign_id == campaign_id, log_model.operation_id == op_id, log_model.event.ilike('%START%')).order_by(log_model.timestamp.asc()).first()
+        end_log = db.query(log_model).filter(log_model.campaign_id == campaign_id, log_model.operation_id == op_id, log_model.event.in_(end_events)).order_by(log_model.timestamp.desc()).first()
 
         if not start_log or not end_log: continue
 
@@ -1098,6 +1204,7 @@ def _generate_summary_for_phase(db: Session, campaign_id: str, type: str, log_mo
         outcome = "FAILURE"
         if type == "ELECTION":
             success_log = db.query(log_model).filter(
+                log_model.campaign_id == campaign_id,
                 log_model.operation_id == op_id, 
                 log_model.event == 'ELECTED'
             ).first()
@@ -1115,7 +1222,7 @@ def _generate_summary_for_phase(db: Session, campaign_id: str, type: str, log_mo
             func.avg(stat_model.estimated_power_mw),
             func.stddev(stat_model.estimated_power_mw),
             func.count(stat_model.id)
-        ).filter(stat_model.operation_id == op_id).one_or_none()
+        ).filter(stat_model.campaign_id == campaign_id, stat_model.operation_id == op_id).one_or_none()
 
         if not avg_stats_and_count or avg_stats_and_count[6] == 0:
             logger.warning(f"No stats found in {stat_model.__tablename__} for {op_id}, skipping summary row.")
@@ -1232,7 +1339,7 @@ def _format_summary_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         df.fillna({'success_count': 0}, inplace=True)
 
         df['operations'] = df.apply(
-            lambda row: f"{int(row.get('success_count', 0))}/{int(row.get('total_ops', 0))}" if row.get('phase_type') in ['ELECTION', 'JOIN', 'REMOVE', 'HEAL', 'AUTH'] else 'N/A', axis=1
+            lambda row: f"{int(row.get('success_count', 0))}/{int(row.get('total_ops', 0))}" if row.get('phase_type') in ['ELECTION', 'JOIN', 'REMOVE', 'HEAL', 'AUTH', 'INTEGRITY_CHECK'] else 'N/A', axis=1
         )
         df['success_rate_perc'] = df.apply(
             lambda row: (row.get('success_count', 0) / row.get('total_ops', 1)) * 100 if row.get('total_ops', 0) > 0 else 0.0, axis=1
@@ -1293,9 +1400,39 @@ def export_one_campaign_summary(campaign_id: str, db: Session = Depends(get_sess
             raise HTTPException(status_code=404, detail=f"No summary data found for campaign '{campaign_id}'.")
 
         formatted_df = _format_summary_dataframe(summaries_df)
-        
+        # SummaryStat does not record the scheme of an authentication: it is taken from its START log, so
+        # that SRAFT, TLS, and MQTTS are reported separately.
+        auth_types = dict(db.query(AuthLog.operation_id, AuthLog.auth_type).filter(
+            AuthLog.campaign_id == campaign_id, AuthLog.event == 'START').all())
+        formatted_df['auth_type'] = summaries_df['operation_id'].map(auth_types)
+        formatted_df.loc[formatted_df['phase_type'] != 'AUTH', 'auth_type'] = None
+
         temp_dir = tempfile.mkdtemp()
         try:
+            # Samples of every device in every operation, with the duration and the outcome of the
+            # operation, so that the costs can be reported per device and per role.
+            per_device_frames = []
+            for phase_type, config in PHASE_CONFIG.items():
+                phase_ops = summaries_df[summaries_df['phase_type'] == phase_type]
+                if phase_ops.empty:
+                    continue
+                stat_model = config["stat_model"]
+                stats_query = db.query(stat_model).filter(stat_model.campaign_id == campaign_id,
+                                                          stat_model.operation_id.in_(phase_ops['operation_id'].tolist()))
+                phase_df = pd.read_sql(stats_query.statement, db.bind)
+                if phase_df.empty:
+                    continue
+                duration_col = 'avg_duration_s' if 'avg_duration_s' in phase_ops.columns else 'duration_seconds'
+                ops = phase_ops[['operation_id', duration_col, 'outcome']].rename(columns={duration_col: 'duration_s'})
+                phase_df = phase_df.merge(ops, on='operation_id', how='left')
+                phase_df['phase_type'] = phase_type
+                phase_df['auth_type'] = phase_df['operation_id'].map(auth_types) if phase_type == 'AUTH' else None
+                phase_df['timestamp'] = phase_df['timestamp'].astype(str)
+                per_device_frames.append(phase_df.drop(columns=['id']))
+            if per_device_frames:
+                pd.concat(per_device_frames, ignore_index=True).to_excel(
+                    os.path.join(temp_dir, "report_per_device.xlsx"), index=False, engine='openpyxl')
+
             global_summary_to_save = formatted_df.sort_values(by=['phase_type'])
             global_summary_to_save.to_excel(os.path.join(temp_dir, "report_global_summary.xlsx"), index=False, engine='openpyxl')
             agg_rules = {
@@ -1335,19 +1472,47 @@ def export_one_campaign_summary(campaign_id: str, db: Session = Depends(get_sess
             removal_df = removal_df.sort_values(by=['phase_type'])
             removal_df.to_excel(os.path.join(temp_dir, "report_scenario_removal.xlsx"), index=False, engine='openpyxl')
 
-            auth_custom_df = agg_df[(agg_df['phase_type'] == 'AUTH') & (agg_df.get('auth_type', 'SRAFT') == 'SRAFT')]
+            attestation_df = agg_df[agg_df['phase_type'] == 'INTEGRITY_CHECK']
+            if not attestation_df.empty:
+                attestation_df.to_excel(os.path.join(temp_dir, "report_scenario_attestation.xlsx"), index=False, engine='openpyxl')
+                # Samples of each device in each attestation, with the duration of the attestation,
+                # so that the cost can be reported per device and per role.
+                stats_query = db.query(AttestStat).filter(AttestStat.campaign_id == campaign_id)
+                per_device_df = pd.read_sql(stats_query.statement, db.bind)
+                # summaries_df has been renamed in place by _format_summary_dataframe.
+                duration_col = 'avg_duration_s' if 'avg_duration_s' in summaries_df.columns else 'duration_seconds'
+                durations = summaries_df[summaries_df['phase_type'] == 'INTEGRITY_CHECK'][['operation_id', duration_col, 'outcome']]
+                durations = durations.rename(columns={duration_col: 'duration_s'})
+                per_device_df = per_device_df.merge(durations, on='operation_id', how='left')
+                starts_query = db.query(AttestLog.operation_id, AttestLog.attested_node_mac, AttestLog.verifier_mac).filter(
+                    AttestLog.campaign_id == campaign_id, AttestLog.event == 'START')
+                starts_df = pd.read_sql(starts_query.statement, db.bind)
+                per_device_df = per_device_df.merge(starts_df, on='operation_id', how='left')
+                # Excel does not store time zones.
+                per_device_df['timestamp'] = per_device_df['timestamp'].astype(str)
+                per_device_df.to_excel(os.path.join(temp_dir, "report_attestation_per_device.xlsx"), index=False, engine='openpyxl')
+
+            auth_rows = formatted_df[formatted_df['phase_type'] == 'AUTH']
+            auth_agg = auth_rows.groupby(['campaign_id', 'phase_type', 'auth_type']).agg(agg_rules).reset_index() \
+                if not auth_rows.empty else pd.DataFrame(columns=['auth_type'])
+            auth_agg = auth_agg.rename(columns={'operations': 'ops_count_in_avg'})
+            auth_custom_df = auth_agg[auth_agg['auth_type'] == 'SRAFT']
             if not auth_custom_df.empty:
                 auth_custom_df.to_excel(os.path.join(temp_dir, "report_auth_sraft.xlsx"), index=False, engine='openpyxl')
             
-            auth_tls_df = agg_df[(agg_df['phase_type'] == 'AUTH') & (agg_df.get('auth_type') == 'TLS')]
+            auth_tls_df = auth_agg[auth_agg['auth_type'] == 'TLS']
             if not auth_tls_df.empty:
                 auth_tls_df.to_excel(os.path.join(temp_dir, "report_auth_tls.xlsx"), index=False, engine='openpyxl')
             
-            auth_mqtts_df = agg_df[(agg_df['phase_type'] == 'AUTH') & (agg_df.get('auth_type') == 'MQTTS')]
+            auth_tls_resumed_df = auth_agg[auth_agg['auth_type'] == 'TLS_RESUMED']
+            if not auth_tls_resumed_df.empty:
+                auth_tls_resumed_df.to_excel(os.path.join(temp_dir, "report_auth_tls_resumed.xlsx"), index=False, engine='openpyxl')
+
+            auth_mqtts_df = auth_agg[auth_agg['auth_type'] == 'MQTTS']
             if not auth_mqtts_df.empty:
                 auth_mqtts_df.to_excel(os.path.join(temp_dir, "report_auth_mqtts.xlsx"), index=False, engine='openpyxl')
             
-            if auth_custom_df.empty and auth_tls_df.empty and auth_mqtts_df.empty:
+            if auth_custom_df.empty and auth_tls_df.empty and auth_tls_resumed_df.empty and auth_mqtts_df.empty:
                 auth_df = agg_df[agg_df['phase_type'] == 'AUTH']
                 if not auth_df.empty:
                     auth_df.to_excel(os.path.join(temp_dir, "report_scenario_authentication.xlsx"), index=False, engine='openpyxl')

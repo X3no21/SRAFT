@@ -1,0 +1,7 @@
+# Partition table of the standard build. The NVS partition holds the PUF helper data, the CRP shards,
+# the network state and the data staged during enrollments; it has the same size as in the build with
+# encryption at rest (partitions_flash_enc.csv).
+# Name,   Type, SubType,  Offset, Size,    Flags
+nvs,      data, nvs,      ,       0x10000,
+phy_init, data, phy,      ,       0x1000,
+factory,  app,  factory,  ,       1500K,

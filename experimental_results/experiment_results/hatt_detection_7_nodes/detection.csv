@@ -1,0 +1,6 @@
+case,tampered_bytes,image_id,changed_words,changed_bits,attestations,detected,no_answer,measured_rate,ci95_low,ci95_high,predicted_rate,duration_s
+reference image (control),0,ae4a37a2f20d7413,0,0,200,0,,0.0,0.0,0.018846005918320894,0.0,
+1 tampered bytes,1,914e93a61354dc33,2,8,200,119,,0.595,0.5257958199999483,0.6606234388755706,0.6563910841941833,
+4 tampered bytes,4,0aedfbd11ebc480f,2,22,200,197,,0.985,0.9568335194437211,0.9948858548155076,0.9755307720761266,
+64 tampered bytes,64,cc2c2fb4243bcff7,17,268,200,200,,1.0,0.9811539940816791,1.0,1.0,
+4096 tampered bytes,4096,77aabef5777d6dfe,1025,16338,200,200,,1.0,0.9811539940816791,1.0,1.0,

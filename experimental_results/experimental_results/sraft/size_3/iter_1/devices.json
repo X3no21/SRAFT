@@ -1,0 +1,21 @@
+{
+  "campaign_id": "single_run_3_nodes_srv",
+  "network_size": 3,
+  "devices": [
+    {
+      "ip": "192.168.1.103",
+      "mac": "90:15:06:94:52:2C",
+      "state": "follower"
+    },
+    {
+      "ip": "192.168.1.176",
+      "mac": "90:15:06:7C:25:90",
+      "state": "leader"
+    },
+    {
+      "ip": "192.168.1.95",
+      "mac": "90:15:06:94:52:24",
+      "state": "follower"
+    }
+  ]
+}

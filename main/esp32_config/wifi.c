@@ -6,6 +6,7 @@
 #include "wifi.h"
 #include "utility.h"
 #include "discovery.h"
+#include "auth_db.h"
 #include "esp_wifi.h"
 #include "sdkconfig.h"
 #include "esp_event.h"
@@ -37,6 +38,9 @@ static void heartbeat_task(void *pvParameters) {
             snprintf(heartbeat_msg, sizeof(heartbeat_msg), "NODE_ALIVE:%s:%s", my_ip_buffer, my_mac_buffer);
             send_monitoring_tcp_event(heartbeat_msg);
         }
+        log_heap("periodic");
+        log_task_stacks();
+        db_log_storage();
     }
 }
 
@@ -51,6 +55,9 @@ static void heartbeat_task(void *pvParameters) {
  * @param event_data A pointer to the data associated with the event.
  * @return void
  */
+// Set by wifi_simulate_failure: the device leaves the network for good, as after a power loss.
+static volatile bool failure_simulated = false;
+
 static void event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         ESP_LOGI(TAG, "Wi-Fi started, attempting to connect");
@@ -64,14 +71,22 @@ static void event_handler(void* arg, esp_event_base_t event_base, int32_t event_
 
         static bool services_started = false;
         if (!services_started) {
-            xTaskCreate(heartbeat_task, "heartbeat_task", 3072, NULL, 5, NULL);
+            xTaskCreate(heartbeat_task, "heartbeat_task", 4096, NULL, 5, NULL);
             services_started = true;
         }
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT);
+        if (failure_simulated) return;
         ESP_LOGW(TAG, "Disconnected from Wi-Fi. Attempting to reconnect...");
         esp_wifi_connect();
-        xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT);
     }
+}
+
+void wifi_simulate_failure(void) {
+    ESP_LOGW(TAG, "Simulated failure: leaving the network without notice.");
+    failure_simulated = true;
+    esp_wifi_disconnect();
+    esp_wifi_stop();
 }
 
 /**

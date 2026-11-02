@@ -1,0 +1,10 @@
+{
+  "network_size": 7,
+  "attestation_prover_mj": 406.212092976888,
+  "attestation_verifier_mj": 457.94128393576796,
+  "authentication_mj": 39.12743831236555,
+  "total_mj": 942.408253537387,
+  "active_s": 3.804873572907424,
+  "sleep_mw": 0.03,
+  "voltage_v": 3.3
+}

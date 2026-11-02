@@ -1,0 +1,27 @@
+# Settings the protocol depends on. They are kept here so that a regenerated sdkconfig
+# (e.g. after an ESP-IDF upgrade) does not fall back to the defaults.
+# Many concurrent connections: HTTP/HTTPS servers, peer connection pool, HAtt, discovery, monitor.
+CONFIG_LWIP_MAX_SOCKETS=96
+# One connection per peer plus HTTP, monitor and HAtt: the default of 16 limits the full mesh to about 14 devices.
+CONFIG_LWIP_MAX_ACTIVE_TCP=40
+# The statistics sampler measures the CPU load from the run time of the idle tasks.
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+CONFIG_FREERTOS_USE_STATS_FORMATTING_FUNCTIONS=y
+CONFIG_FREERTOS_RUN_TIME_STATS_USING_ESP_TIMER=y
+# Raft timers run their callbacks in the timer task.
+CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=4096
+CONFIG_FREERTOS_IN_IRAM=y
+# TLS buffers sized on the records actually exchanged instead of 16 KB reserved per session, so that
+# the TLS and MQTTS baselines fit in the heap left by the protocol (the configuration data is not freed,
+# because the HTTPS server reuses it for every connection).
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+# NVS of 64 KB (partitions.csv): the 24 KB of the default single-app table are filled by the PUF
+# helper data and the CRP shards, and the CRPs staged during an enrollment no longer fit.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+# Abortive close of the connections with failed peers (connection_pool.c), so that their queued data is freed.
+CONFIG_LWIP_SO_LINGER=y
+# Session tickets (RFC 5077) for the "TLS_RESUMED" baseline: the client resumes the session of an earlier full
+# handshake with the HTTPS server of the target device.
+CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS=y
+CONFIG_ESP_TLS_SERVER_SESSION_TICKETS=y

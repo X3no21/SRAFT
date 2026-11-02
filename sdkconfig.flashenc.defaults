@@ -1,0 +1,9 @@
+# Encryption at rest: ESP-IDF flash encryption (key in eFuse) plus NVS encryption.
+# WARNING: flashing a board with this configuration burns eFuses at the first boot and cannot be
+# fully undone. Development mode still allows re-flashing; Release mode does not.
+CONFIG_SECURE_FLASH_ENC_ENABLED=y
+CONFIG_SECURE_FLASH_ENCRYPTION_MODE_DEVELOPMENT=y
+CONFIG_NVS_ENCRYPTION=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_flash_enc.csv"
+CONFIG_PARTITION_TABLE_OFFSET=0x10000

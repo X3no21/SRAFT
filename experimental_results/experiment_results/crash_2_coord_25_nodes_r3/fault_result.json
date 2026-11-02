@@ -1,0 +1,13 @@
+{
+  "fault": "crash",
+  "faulty_devices": 2,
+  "coordinator_included": true,
+  "network_size": 25,
+  "times": {
+    "new_coordinator_s": 43.3,
+    "removed_s": 223.4,
+    "restored_s": 223.4
+  },
+  "authenticated_after": 23,
+  "survivors": 23
+}

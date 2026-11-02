@@ -21,7 +21,7 @@ The project spans three machines:
       │                                                             │
       └──────────────── USB (flashing + raw serial/debug log) ─────┘
 
- Local dev machine ── SSH/SCP + HTTP (iotlabvr.ddns.net) ──►  Raspberry Pi
+ Local dev machine ── SSH/SCP + HTTP (RASPBERRY_PI_IP) ───►  Raspberry Pi
    (build firmware, orchestrate deploy & test campaigns, generate plots)
 ```
 
@@ -38,34 +38,37 @@ main/                     ESP-IDF firmware (C)
   raft/                   Raft consensus
   rest_api/               Node REST API (ports 80/443)
   esp32_config/           WiFi + peer discovery
-  certs/                  ca.crt / device.crt / device.key (embedded in the firmware)
+  utils/                  PUF fuzzy extractor (BCH), connection pool, stats sampling, helpers
+  attack/                 Test-only adversary hooks for the attack-resilience campaign (off by default)
+  certs/                  Placeholders for ca.crt / device.crt / device.key (real files in certs_local/)
 scripts/
   client/                 Scripts run from the local dev machine (build/deploy/sync)
   server/                 Scripts run on the Raspberry Pi (deploy server, monitor, DB)
   mqtts/, tls/            MQTTS broker setup and certificate generation (TLS/MQTTS baselines only)
-  tests/                  Experiment orchestration + plot generation
+  tests/                  Experiment orchestration (pipeline, campaigns, attacks) + statistics/plots
 docs/Setup_Raspberry.md   NTP (chrony) setup notes for the Raspberry Pi
-experimental_results/     Test campaign output, per cluster size
+experimental_results/     Archived experimental data (see section 4.6)
 ```
 
 ## 1. Network addresses and constants to adapt
 
 Some values are hardcoded both in the firmware and in the scripts. If your Raspberry Pi / network differ from the project defaults, update these **before building the firmware** (they get compiled into the binary).
 
-> **Credentials and key material are not shipped.** This repository is publicly archived, so WiFi credentials, database passwords and TLS keys are placeholders. The entries marked ⚠️ below **must** be set to real values before anything will run, and `main/certs/` must be regenerated (see section 1.1).
+> **Credentials and key material are not shipped.** This repository is publicly archived, so WiFi credentials, database passwords and TLS keys are placeholders. The entries marked ⚠️ below **must** be set to real values before anything will run, and the TLS certificates must be generated (see section 1.1).
 
 | File | Constant | Default | Meaning |
 |---|---|---|---|
-| ⚠️ `main/esp32_config/wifi.h` | `WIFI_SSID`, `WIFI_PASS` | `YOUR_WIFI_SSID` / `YOUR_WIFI_PASSWORD` | WiFi network that both the ESP32 nodes and the Raspberry Pi join |
+| ⚠️ `main/esp32_config/wifi_credentials.h` (gitignored, create it) | `WIFI_SSID`, `WIFI_PASS` | `YOUR_WIFI_SSID` / `YOUR_WIFI_PASSWORD` (placeholders in `wifi.h`) | WiFi network that both the ESP32 nodes and the Raspberry Pi join |
+| ⚠️ `main/esp32_config/network_secret.h` (gitignored, create it) | `SRAFT_NETWORK_SECRET` (32 random bytes, e.g. `python3 -c "import secrets;print(', '.join(f'0x{b:02X}' for b in secrets.token_bytes(32)))"`) | placeholder in `hatt_protocol.c` (build warning) | Network secret provisioned at bootstrap; keys the attestations made by a device that holds no CRP of the attested device |
 | `main/utils/utility.h` | `MONITORING_SERVER_IP`, `MONITORING_PORT` | `192.168.1.125` / `9001` | Static IP of the Raspberry Pi on that WiFi network (execution log/heartbeat TCP endpoint) |
 | `main/rest_api/rest_api.h` | `MQTT_BROKER_IP`, `MQTT_BROKER_PORT` | `192.168.1.125` / `8883` | IP of the MQTTS broker (same Raspberry Pi) — only relevant for the MQTTS baseline |
-| `scripts/client/client_deploy.py`, `scripts/tests/experimental_campaign.py`, `scripts/utils/utils.py` | `RASPBERRY_USER`, `RASPBERRY_PI_IP` | `raspberrypi5` / `iotlabvr.ddns.net` | Host/user the local dev machine uses for SSH/SCP and to reach the deploy server (`:8000`) and monitor API (`:9002`) |
-| `scripts/server/server_deploy.py` | `FIRMWARE_DIR` | `/home/raspberrypi5/firmware` | Directory on the Raspberry Pi where firmware is uploaded before flashing |
-| `scripts/client/sync_raspberry.sh` | `SOURCE_DIR`, `DESTINATION` | local checkout path / `raspberrypi5@iotlabvr.ddns.net:...` | Local/remote paths for the live sync loop |
+| `scripts/client/client_deploy.py`, `scripts/tests/experimental_campaign.py`, `scripts/utils/utils.py` | `RASPBERRY_USER`, `RASPBERRY_PI_IP` | `pi` / `raspberrypi.local` | Host/user the local dev machine uses for SSH/SCP and to reach the deploy server (`:8000`) and monitor API (`:9002`). `scripts/tests/pipeline.py` reuses them and expects the checkout at `/home/<RASPBERRY_USER>/Documents/git/SRAFT` on the Pi |
+| `scripts/server/server_deploy.py` | `FIRMWARE_DIR` | `/home/pi/firmware` | Directory on the Raspberry Pi where firmware is uploaded before flashing |
+| `scripts/client/sync_raspberry.sh` | `DESTINATION` | `pi@raspberrypi.local:/home/pi/Documents/git/SRAFT` | Remote path for the live sync loop (the source is this checkout) |
 
-Note: `RASPBERRY_PI_IP` (the DDNS hostname) is the address the *local dev machine* uses to reach the Raspberry Pi's deploy/monitor services, while `MONITORING_SERVER_IP`/`MQTT_BROKER_IP` (`192.168.1.125`) is the Pi's *internal* static IP on the WiFi network shared with the ESP32 nodes — they can be two different addresses of the same Raspberry Pi (e.g. a LAN IP vs. a DDNS name resolving through port forwarding).
+Note: `RASPBERRY_PI_IP` (a hostname reachable from the dev machine) is the address the *local dev machine* uses to reach the Raspberry Pi's deploy/monitor services, while `MONITORING_SERVER_IP`/`MQTT_BROKER_IP` (`192.168.1.125`) is the Pi's *internal* static IP on the WiFi network shared with the ESP32 nodes — they can be two different addresses of the same Raspberry Pi (e.g. a LAN IP vs. a DDNS name resolving through port forwarding).
 
-Database credentials are read from the environment, with no usable default:
+Database credentials are read from the environment, with no usable default. `scripts/server/services.sh` loads them from `scripts/server/.env` (gitignored) if the file exists:
 
 | Variable | Used by | Meaning |
 |---|---|---|
@@ -75,19 +78,19 @@ Database credentials are read from the environment, with no usable default:
 
 ### 1.1 TLS/MQTTS baseline certificates
 
-`main/certs/{ca.crt,device.crt,device.key}` ship as **placeholders** — no real key material is distributed. These three files are embedded into the firmware binary at build time (`EMBED_TXTFILES` in [main/CMakeLists.txt](main/CMakeLists.txt)) and are also installed on the MQTTS broker by [scripts/mqtts/setup_mqtts_broker.sh](scripts/mqtts/setup_mqtts_broker.sh), so they must be generated before the first build:
+`main/certs/{ca.crt,device.crt,device.key}` ship as **placeholders** — no real key material is distributed. The real files go in `main/certs_local/` (gitignored): when that folder exists the build embeds it instead of the placeholders (`EMBED_TXTFILES` in [main/CMakeLists.txt](main/CMakeLists.txt), CMake prints a warning otherwise), and [scripts/mqtts/setup_mqtts_broker.sh](scripts/mqtts/setup_mqtts_broker.sh) installs it on the MQTTS broker. Generate them before the first build:
 
 ```bash
 ./scripts/tls/generate_certs.sh
 ```
 
-That single command creates a test CA and writes exactly the three files the build expects, in place:
+That single command creates a test CA and writes exactly the three files the build expects:
 
 | File | Content |
 |---|---|
-| `main/certs/ca.crt` | Test CA certificate |
-| `main/certs/device.crt` | Device/broker certificate signed by that CA (`CN=192.168.1.125`, with a matching `subjectAltName`) |
-| `main/certs/device.key` | Matching 2048-bit RSA private key |
+| `main/certs_local/ca.crt` | Test CA certificate |
+| `main/certs_local/device.crt` | Device/broker certificate signed by that CA (`CN=192.168.1.125`, with a matching `subjectAltName`) |
+| `main/certs_local/device.key` | Matching 2048-bit RSA private key |
 
 The CA private key stays in `scripts/tls/ca/` and is never copied into the firmware tree. Re-running the script reuses an existing CA, so certificates issued for nodes already flashed stay valid.
 
@@ -103,7 +106,7 @@ LEAF_DAYS=90 ./scripts/tls/generate_certs.sh         # shorter validity
 
 These certificates are used exclusively by the mTLS and MQTTS **baselines**; the SRAFT protocol itself does not depend on them.
 
-> ⚠️ Everything generated under `scripts/tls/` is gitignored, but the three files in `main/certs/` stay **tracked** — the build fails if they are missing. After running the script they hold real key material: check `git status` and restore the placeholders before committing.
+> ⚠️ Everything generated under `scripts/tls/` and `main/certs_local/` is gitignored. The three placeholders in `main/certs/` stay **tracked** — the build fails if they are missing — so **do not copy your real certificates over them**.
 
 ## 2. Prerequisites — local dev machine (build firmware + orchestrate tests)
 
@@ -122,7 +125,7 @@ These certificates are used exclusively by the mTLS and MQTTS **baselines**; the
    pip install -r scripts/client/requirements.txt
    pip install -r scripts/tests/requirements.txt
    ```
-3. **System utilities**: `zip` (used to package the firmware before sending it to the Pi), `ssh`/`scp` (a passphrase-less key for `raspberrypi5@iotlabvr.ddns.net` is recommended), and optionally `inotify-tools` + `rsync` if you use `sync_raspberry.sh`.
+3. **System utilities**: `zip` (used to package the firmware before sending it to the Pi), `ssh`/`scp` (a passphrase-less key for `<RASPBERRY_USER>@<RASPBERRY_PI_IP>` is recommended), and optionally `inotify-tools` + `rsync` if you use `sync_raspberry.sh`.
 
 ## 3. Prerequisites and startup — Raspberry Pi (connected to the ESP32 nodes)
 
@@ -164,7 +167,7 @@ Connect all the ESP32 boards to the Raspberry Pi over USB (they show up as `/dev
 python3 scripts/server/server_deploy.py
 ```
 
-This exposes a FastAPI service on `:8000` (`/deploy`, `/reset`, `/nodes/send_command`, `/nodes/broadcast_command`) used by the local dev machine to flash/reset nodes and to proxy calls to each ESP32's REST API. It also continuously captures the raw serial output (classic `ESP_LOGx` debug logs) of every connected device into `scripts/server/logs/<device>.log`, restarting the capture automatically around each deploy/reset. `/home/raspberrypi5/firmware` (must match `FIRMWARE_DIR`/`RASPBERRY_DIR` used by the local scripts) is created automatically.
+This exposes a FastAPI service on `:8000` (`/deploy`, `/reset`, `/nodes/send_command`, `/nodes/broadcast_command`) used by the local dev machine to flash/reset nodes and to proxy calls to each ESP32's REST API. It also continuously captures the raw serial output (classic `ESP_LOGx` debug logs) of every connected device into `scripts/server/logs/<device>.log`, restarting the capture automatically around each deploy/reset. `/home/pi/firmware` (must match `FIRMWARE_DIR`/`RASPBERRY_DIR` used by the local scripts) is created automatically.
 
 ### 3.5 Monitoring server — execution logs and test metrics (ports 9001/9002)
 
@@ -178,14 +181,14 @@ Starts a raw TCP listener on `:9001` (structured events/heartbeats sent by the E
 
 ### 3.6 Optional — MQTTS broker (port 8883, mTLS baseline only)
 
-Only needed if you want to reproduce the TLS/MQTTS baseline comparisons from the paper (SRAFT itself does not need it). The certificates used by the firmware (shared by all nodes) are already committed in [main/certs/](main/certs/) (`ca.crt`, `device.crt`, `device.key`). On the Raspberry Pi:
+Only needed if you want to reproduce the TLS/MQTTS baseline comparisons from the paper (SRAFT itself does not need it). It installs the certificates used by the firmware (shared by all nodes) from `main/certs_local/` (`ca.crt`, `device.crt`, `device.key`, see section 1.1), so generate them first. On the Raspberry Pi:
 
 ```bash
 sudo scripts/mqtts/setup_mqtts_broker.sh -r   # first-time install: installs mosquitto, copies the certs, configures mTLS
 sudo scripts/mqtts/setup_mqtts_broker.sh      # subsequent restarts (no -r)
 ```
 
-If you regenerate certificates with [scripts/tls/generate_certs.sh](scripts/tls/generate_certs.sh), replace the files under `main/certs/`, **rebuild and reflash the firmware** (the certs are embedded in the binary, see `EMBED_TXTFILES` in [main/CMakeLists.txt](main/CMakeLists.txt)), and rerun `setup_mqtts_broker.sh -r` on the broker.
+If you regenerate certificates with [scripts/tls/generate_certs.sh](scripts/tls/generate_certs.sh), **rebuild and reflash the firmware** (the certs are embedded in the binary, see `EMBED_TXTFILES` in [main/CMakeLists.txt](main/CMakeLists.txt)), and rerun `setup_mqtts_broker.sh -r` on the broker.
 
 ## 4. Build, deploy and test from the local dev machine
 
@@ -233,13 +236,45 @@ python experimental_campaign.py --full-experiment -i 10
 
 Per-campaign reports (`.xlsx`) are saved under `experiment_results/<campaign_id>/`; the aggregated final report is saved in the root of `experiment_results/`.
 
-### 4.5 Generate plots
+`scripts/tests/pipeline.py` drives the whole cycle from the local machine (sync of the scripts, restart of the server services through `scripts/server/services.sh`, build, campaign, download and analysis of the serial logs):
+
+```bash
+cd scripts/tests
+python pipeline.py build --profile release            # firmware without serial logs, for the measurements
+python pipeline.py build --profile release --tampered # also the test image of the failed-attestation scenario
+python pipeline.py run -n 5 --profile release --sraft-only        # SRAFT only, baselines skipped
+python pipeline.py run -n 5 --profile release --integrity-test    # last device runs the tampered image
+python pipeline.py run -n 5 --detection-test --runs 200            # detection rate of the attestation
+```
+
+The `debug` profile (default) keeps the serial logs and the heap/stack diagnostics, which `pipeline.py analyze` summarizes. The tampered images are not compiled: `scripts/tests/make_tampered_image.py` copies the reference image and overwrites part of a region of 4 KB of constant data (`main/device_integrity_verification/attestation_test_region.c`) with random bytes, updating the checksum and the digest so that the device boots normally. The failed-attestation scenario overwrites the whole region; the detection test overwrites 1, 4, 64 and 4096 bytes, attests each image 200 times from a device with the reference image, and compares the measured detection rate with the one predicted from the HAtt parameters (`experiment_results/hatt_detection_*/detection.csv`).
+
+### 4.5 Generate plots and statistics
 
 ```bash
 cd scripts/tests
 python generate_plots.py
 ```
-Reads the aggregated results from `experimental_results/` (see the data already present under `experimental_results/{sraft,tls,mqtts}/size_*`) and writes plots to `experimental_results/plots/`.
+Reads the aggregated results from `experimental_results/` and writes plots to `experimental_results/plots/`; the tables report mean ± standard deviation over the runs.
+
+```bash
+python statistics_report.py
+```
+Writes to `experimental_results/statistics/` the raw values and, for every scenario and network size, n, mean, standard deviation, 95% confidence interval, median, min and max; the linear fit of the duration against the network size; Welch's t-test, Mann-Whitney U test and Cohen's d of SRAFT against TLS and MQTTS; the detection table (`experiment_results/hatt_detection_*`) and the table of the fault scenarios (`experiment_results/fault_*`, mean ± standard deviation over the repetitions).
+
+### 4.6 Archived experimental data
+
+The [experimental_results/](experimental_results/) folder of this repository contains the data reported in the paper:
+
+| Folder | Content |
+|---|---|
+| `experimental_results/{sraft,tls,mqtts}/size_<N>/iter_<i>/` | Per-run and per-device (`intra_device/`) reports of the campaign, for every network size |
+| `experiment_results/` | Raw runs of the fault scenarios and of the HAtt detection test (`below_minimum/`: fault runs on fewer than 2f+1 devices, not analyzed) |
+| `statistics/` | Output of `statistics_report.py` |
+| `attack/` | Results of the attack-resilience campaign (`scripts/tests/attack_campaign.py`) |
+| `plots/`, `paper/` | Plots and LaTeX tables used in the paper |
+
+`scripts/tests/update_paper_results.py` and `scripts/tests/update_attack_results.py` rebuild `paper/` from these files, with no hardware or network access.
 
 ## 5. Quick reference — ports and services
 
@@ -270,7 +305,6 @@ Raw serial/debug logs (`ESP_LOGx`) are captured directly over USB by `server_dep
 | `/remove_node` | POST | Request removal of a node from the cluster |
 | `/cluster/heal` | POST | Trigger cluster self-healing |
 | `/reboot` | POST | Reboot the node |
-| `/test/tamper_secret` | POST | Corrupt the PUF secret (for integrity-failure tests) |
 
 ## 7. Troubleshooting
 
@@ -278,14 +312,30 @@ Raw serial/debug logs (`ESP_LOGx`) are captured directly over USB by `server_dep
 - **`monitoring_server.py` exits immediately**: almost always means PostgreSQL isn't reachable on `localhost:5432` (start it first, section 3.2).
 - **ESP32 nodes never show up online**: check that `WIFI_SSID`/`WIFI_PASS` in the firmware match the network the Raspberry Pi is on, and that `MONITORING_SERVER_IP` matches the Pi's static IP on that network (section 1), then rebuild and reflash.
 - **MQTTS authentication fails**: check that the broker is running (`systemctl status mosquitto` on the Pi) and that the certificates in `/etc/mosquitto/certs` match the ones embedded in the firmware (`main/certs/`).
-- **TLS handshake always fails**: `main/certs/` still contains the shipped placeholders. Generate real certificates (section 1.1) and rebuild.
+- **TLS handshake always fails**: `main/certs_local/` is missing, so the build embedded the shipped placeholders (CMake prints a warning). Generate real certificates (section 1.1) and rebuild.
 - **`start_postgres.sh` aborts immediately**: `POSTGRES_PASSWORD` is not exported in your shell (section 1).
 
-## 8. License
+## 8. Encryption at rest (optional build)
+
+The CRP shards are stored in NVS. To encrypt them at rest, build with the additional defaults in
+`sdkconfig.flashenc.defaults`, which enable ESP-IDF flash encryption (AES-256, key in eFuse) and NVS
+encryption (keys in the `nvs_keys` partition of `partitions_flash_enc.csv`):
+
+```
+idf.py -B build_enc -D SDKCONFIG=sdkconfig.enc \
+       -D "SDKCONFIG_DEFAULTS=sdkconfig;sdkconfig.flashenc.defaults" build
+```
+
+**Warning:** the first boot of a board flashed with this build burns eFuses and enables flash
+encryption permanently. The configuration uses Development mode, which still allows re-flashing
+(`idf.py encrypted-flash`) and a limited number of plaintext re-flashes; Release mode does not.
+See the ESP-IDF flash-encryption documentation before flashing.
+
+## 9. License
 
 Released under the MIT License — see [LICENSE](LICENSE).
 
-## 9. Citing this work
+## 10. Citing this work
 
 Each tagged release of this repository is archived on Zenodo with its own DOI. If you use the code or the experimental data, please cite the archived release:
 
@@ -296,10 +346,10 @@ Each tagged release of this repository is archived on Zenodo with its own DOI. I
                   Software Attestation for {IoT} Devices Based on Physical
                   Unclonable Functions},
   howpublished = {Zenodo},
-  version      = {v1.0.0},
+  version      = {v1.1.0},
   year         = {2026},
-  doi          = {10.5281/zenodo.21724795},
-  url          = {https://doi.org/10.5281/zenodo.21724795}
+  doi          = {10.5281/zenodo.21724794},
+  url          = {https://doi.org/10.5281/zenodo.21724794}
 }
 ```
 
@@ -309,5 +359,6 @@ Zenodo mints two DOIs for this artifact:
 |---|---|---|
 | [10.5281/zenodo.21724794](https://doi.org/10.5281/zenodo.21724794) | Always the latest release (concept DOI) | Linking to the project in general — this is the badge above |
 | [10.5281/zenodo.21724795](https://doi.org/10.5281/zenodo.21724795) | `v1.0.0` specifically (version DOI) | Citing in a paper, where reproducibility requires a frozen snapshot |
+| Shown on the Zenodo record of each release | That release only (version DOI) | Same as above, for later releases such as `v1.1.0` |
 
 GitHub also renders a ready-made citation from [CITATION.cff](CITATION.cff) via the *Cite this repository* button.

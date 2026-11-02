@@ -1,7 +1,8 @@
 #!/bin/bash
 
-SOURCE_DIR="/home/x3no21/git/DistributedAuthenticationPUF"
-DESTINATION="raspberrypi5@iotlabvr.ddns.net:/home/raspberrypi5/Documents/DistributedAuthenticationPUF"
+# Root of this checkout, two levels above this script.
+SOURCE_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+DESTINATION="pi@raspberrypi.local:/home/pi/Documents/git/SRAFT"
 
 echo "Starting real-time synchronization..."
 

@@ -8,11 +8,21 @@
 
 #include "freertos/FreeRTOS.h"
 
-/* Set these to the credentials of the WiFi network shared by the ESP32 nodes
- * and the Raspberry Pi. They are compiled into the firmware binary, so the
- * firmware must be rebuilt and reflashed after any change. */
+/* Credentials of the WiFi network shared by the ESP32 nodes and the Raspberry Pi.
+ * Put the real ones in wifi_credentials.h (gitignored), next to this file:
+ *     #define WIFI_SSID "..."
+ *     #define WIFI_PASS "..."
+ * They are compiled into the firmware binary, so the firmware must be rebuilt
+ * and reflashed after any change. */
+#if __has_include("wifi_credentials.h")
+#include "wifi_credentials.h"
+#endif
+#ifndef WIFI_SSID
 #define WIFI_SSID           "YOUR_WIFI_SSID"
+#endif
+#ifndef WIFI_PASS
 #define WIFI_PASS           "YOUR_WIFI_PASSWORD"
+#endif
 #define WIFI_CONNECTED_BIT  BIT0
 
 /**
@@ -24,5 +34,11 @@
  * @return void
  */
 void wifi_init_sta(void);
+
+/**
+ * @brief Disconnects the device from the network and keeps it disconnected. For tests only: it simulates
+ * an abrupt failure, since the device stops answering without notifying anyone.
+ */
+void wifi_simulate_failure(void);
 
 #endif // WIFI_H

@@ -3,6 +3,7 @@
  * Description: Utility functions.
  * ============================= */
 
+#include "esp_heap_caps.h"
 #include "utility.h"
 #include "raft_state.h"
 #include <lwip/sockets.h>
@@ -22,12 +23,23 @@
 #include "psa/crypto.h"
 #include "soc/rtc_cntl_reg.h"
 #include "soc/rtc.h"
+#include "nvs.h"
+#include "esp_random.h"
+#include "puf_extractor.h"
 #include <time.h>
 
 static const char *TAG = "UTILITY";
 
-static uint32_t sram_fingerprint[SRAM_PUF_SIZE_WORDS] = {0};
-static uint32_t reliability_mask[SRAM_PUF_SIZE_WORDS] = {0};
+#define PUF_NVS_NAMESPACE "sraft_puf"
+#define PUF_NVS_KEY_MASK "mask"
+#define PUF_NVS_KEY_HELPER "helper"
+#define PUF_MAX_BLOCKS ((SRAM_PUF_SIZE_WORDS * 32) / BCH_N)
+#define PUF_PACKED_BYTES ((PUF_MAX_BLOCKS * BCH_N + 7) / 8)
+
+// Corrected value of the retained cells, in order and bit-packed. It exists in RAM only.
+static uint8_t *puf_cells = NULL;
+static uint8_t puf_failed_blocks[(PUF_MAX_BLOCKS + 7) / 8] = {0};
+static int puf_total_blocks = 0;
 
 static bool puf_initialized = false;
 
@@ -264,155 +276,195 @@ void send_monitoring_tcp_event(const char *event_message) {
 }
 
 /**
- * @brief Reads and stabilizes SRAM fingerprint using Vatajelu's Stability Test.
- * @details Defines a method to identify unreliable cells based on stability test.
- * We simulate multiple power-ups by toggling the power domain of the RTC Slow Memory
- * at runtime. This forces the SRAM cells to re-initialize, generating fresh entropy
- * for each readout without requiring a full system reboot.
+ * @brief Power-cycles the RTC slow memory and reads the start-up value of its cells.
+ * @details The power domain of the RTC slow memory is switched off and on at runtime, so that the
+ * cells settle again into their start-up state without a reboot of the device.
+ * @param reading Output buffer of SRAM_PUF_SIZE_WORDS words.
+ */
+static void sram_puf_read(uint32_t *reading) {
+    volatile uint32_t *rtc_slow_mem = (volatile uint32_t *)0x50000000;
+
+    vTaskSuspendAll();
+    SET_PERI_REG_MASK(RTC_CNTL_PWC_REG, RTC_CNTL_SLOWMEM_FORCE_PD);
+    CLEAR_PERI_REG_MASK(RTC_CNTL_PWC_REG, RTC_CNTL_SLOWMEM_FORCE_PU);
+    esp_rom_delay_us(20000);
+
+    CLEAR_PERI_REG_MASK(RTC_CNTL_PWC_REG, RTC_CNTL_SLOWMEM_FORCE_PD);
+    SET_PERI_REG_MASK(RTC_CNTL_PWC_REG, RTC_CNTL_SLOWMEM_FORCE_PU);
+    esp_rom_delay_us(5000);
+
+    for (int i = 0; i < SRAM_PUF_SIZE_WORDS; i++) {
+        reading[i] = rtc_slow_mem[i];
+    }
+
+    CLEAR_PERI_REG_MASK(RTC_CNTL_PWC_REG, RTC_CNTL_SLOWMEM_FORCE_PU);
+    xTaskResumeAll();
+}
+
+/**
+ * @brief Initializes the SRAM PUF.
+ * @details On the first boot the device is provisioned: the cells are read SRAM_PUF_READOUTS times
+ * and only those that returned the same value every time are retained (stability test of Vatajelu
+ * et al.); the fuzzy extractor then produces the helper data. The stability mask and the helper
+ * data are the only values written to non-volatile storage, and neither reveals the cells.
+ * On every later boot the cells are read once and corrected back to the value they had at
+ * provisioning, so that the responses of the device do not change across power cycles.
  */
 void init_sram_puf(void) {
     if (puf_initialized) {
         return;
     }
-    
-    ESP_LOGI(TAG, "Initializing SRAM-PUF fingerprint...");
-    vTaskSuspendAll();
 
-    uint32_t (*readouts)[SRAM_PUF_SIZE_WORDS] = malloc(SRAM_PUF_READOUTS * sizeof(*readouts));
-    if (readouts == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate memory for PUF readouts");
+    ESP_LOGI(TAG, "Initializing SRAM-PUF...");
+    bch_init();
+
+    uint32_t *reading = malloc(SRAM_PUF_SIZE_WORDS * sizeof(uint32_t));
+    uint32_t *mask = malloc(SRAM_PUF_SIZE_WORDS * sizeof(uint32_t));
+    uint8_t *helper = calloc(1, PUF_PACKED_BYTES);
+    puf_cells = calloc(1, PUF_PACKED_BYTES);
+    if (!reading || !mask || !helper || !puf_cells) {
+        ESP_LOGE(TAG, "Failed to allocate memory for the SRAM-PUF");
+        free(reading);
+        free(mask);
+        free(helper);
         return;
     }
 
-    volatile uint32_t *rtc_slow_mem = (volatile uint32_t *)0x50000000;
-    
-    for (int r = 0; r < SRAM_PUF_READOUTS; r++) {
-        SET_PERI_REG_MASK(RTC_CNTL_PWC_REG, RTC_CNTL_SLOWMEM_FORCE_PD);
-        CLEAR_PERI_REG_MASK(RTC_CNTL_PWC_REG, RTC_CNTL_SLOWMEM_FORCE_PU);
-        esp_rom_delay_us(20000);
-        
-        CLEAR_PERI_REG_MASK(RTC_CNTL_PWC_REG, RTC_CNTL_SLOWMEM_FORCE_PD);
-        SET_PERI_REG_MASK(RTC_CNTL_PWC_REG, RTC_CNTL_SLOWMEM_FORCE_PU);
-        
-        esp_rom_delay_us(5000);
-        
-        for (int i = 0; i < SRAM_PUF_SIZE_WORDS; i++) {
-            readouts[r][i] = rtc_slow_mem[i];
-        }
-        
-        CLEAR_PERI_REG_MASK(RTC_CNTL_PWC_REG, RTC_CNTL_SLOWMEM_FORCE_PU);
-    }
-    
-    xTaskResumeAll();
-    
-    uint32_t reliable_bits_count = 0;
+    bool provisioned = false;
+    nvs_handle_t puf_handle;
+    if (nvs_open(PUF_NVS_NAMESPACE, NVS_READWRITE, &puf_handle) == ESP_OK) {
+        size_t mask_size = SRAM_PUF_SIZE_WORDS * sizeof(uint32_t);
+        size_t helper_size = PUF_PACKED_BYTES;
+        provisioned = nvs_get_blob(puf_handle, PUF_NVS_KEY_MASK, mask, &mask_size) == ESP_OK &&
+                      mask_size == SRAM_PUF_SIZE_WORDS * sizeof(uint32_t) &&
+                      nvs_get_blob(puf_handle, PUF_NVS_KEY_HELPER, helper, &helper_size) == ESP_OK &&
+                      helper_size == PUF_PACKED_BYTES;
 
-    for (int i = 0; i < SRAM_PUF_SIZE_WORDS; i++) {
-        uint32_t stable_word = 0;
-        uint32_t mask_word = 0;
+        if (!provisioned) {
+            ESP_LOGW(TAG, "SRAM-PUF not provisioned yet. Running the stability test over %d readings.", SRAM_PUF_READOUTS);
+            uint32_t *first_reading = malloc(SRAM_PUF_SIZE_WORDS * sizeof(uint32_t));
+            if (first_reading) {
+                sram_puf_read(first_reading);
+                memset(mask, 0xFF, SRAM_PUF_SIZE_WORDS * sizeof(uint32_t));
+                for (int r = 1; r < SRAM_PUF_READOUTS; r++) {
+                    sram_puf_read(reading);
+                    for (int i = 0; i < SRAM_PUF_SIZE_WORDS; i++) {
+                        mask[i] &= ~(reading[i] ^ first_reading[i]);
+                    }
+                }
 
-        for (int bit = 0; bit < 32; bit++) {
-            int ones = 0;
-            for (int r = 0; r < SRAM_PUF_READOUTS; r++) {
-                if (readouts[r][i] & (1 << bit)) {
-                    ones++;
+                memset(helper, 0, PUF_PACKED_BYTES);
+                int blocks = puf_extractor_count_blocks(mask, SRAM_PUF_SIZE_WORDS);
+                puf_extractor_generate(first_reading, mask, SRAM_PUF_SIZE_WORDS, blocks, helper, esp_random);
+                free(first_reading);
+
+                if (nvs_set_blob(puf_handle, PUF_NVS_KEY_MASK, mask, SRAM_PUF_SIZE_WORDS * sizeof(uint32_t)) == ESP_OK &&
+                    nvs_set_blob(puf_handle, PUF_NVS_KEY_HELPER, helper, PUF_PACKED_BYTES) == ESP_OK &&
+                    nvs_commit(puf_handle) == ESP_OK) {
+                    provisioned = true;
+                } else {
+                    ESP_LOGE(TAG, "Could not store the stability mask and the helper data. Responses will not survive a reboot.");
+                    provisioned = true;
                 }
             }
-
-            if (ones == SRAM_PUF_READOUTS) {
-                stable_word |= (1 << bit);
-                mask_word |= (1 << bit);
-                reliable_bits_count++;
-            } else if (ones == 0) {
-                stable_word &= ~(1 << bit);
-                mask_word |= (1 << bit);
-                reliable_bits_count++;
-            } else {
-                mask_word &= ~(1 << bit);
-            }
         }
-        sram_fingerprint[i] = stable_word;
-        reliability_mask[i] = mask_word;
-    }
-    
-    puf_initialized = true;
-    
-    free(readouts);
-    
-    ESP_LOGI(TAG, "SRAM-PUF initialized. Reliable bits: %lu/65536 (%lu%%)", 
-             reliable_bits_count, (reliable_bits_count * 100) / 65536);
-
-    const char *test_challenge = "TEST_CHALLENGE";
-    char resp1[64], resp2[64];
-    simulate_puf_response((uint8_t*)test_challenge, strlen(test_challenge), resp1);
-    simulate_puf_response((uint8_t*)test_challenge, strlen(test_challenge), resp2);
-    
-    if (strcmp(resp1, resp2) == 0) {
-        ESP_LOGI(TAG, "PUF Determinism Check: PASS (Resp: %s)", resp1);
+        nvs_close(puf_handle);
     } else {
-        ESP_LOGE(TAG, "PUF Determinism Check: FAIL (R1: %s, R2: %s)", resp1, resp2);
+        ESP_LOGE(TAG, "Could not open the SRAM-PUF storage.");
     }
+
+    if (provisioned) {
+        sram_puf_read(reading);
+        puf_total_blocks = puf_extractor_count_blocks(mask, SRAM_PUF_SIZE_WORDS);
+        int failed = puf_extractor_reproduce(reading, mask, SRAM_PUF_SIZE_WORDS, puf_total_blocks, helper, puf_cells, puf_failed_blocks);
+        puf_initialized = true;
+
+        ESP_LOGI(TAG, "SRAM-PUF initialized. Retained cells: %d/%d, blocks: %d (%d not corrected), responses available: %d",
+                 puf_total_blocks * BCH_N, SRAM_PUF_SIZE_WORDS * 32, puf_total_blocks, failed, puf_total_blocks / PUF_BLOCKS_PER_RESPONSE);
+        if (puf_total_blocks / PUF_BLOCKS_PER_RESPONSE < PUF_RESPONSE_CAPACITY) {
+            ESP_LOGE(TAG, "The retained cells provide fewer than %d responses.", PUF_RESPONSE_CAPACITY);
+        }
+    }
+
+    memset(reading, 0, SRAM_PUF_SIZE_WORDS * sizeof(uint32_t));
+    free(reading);
+    free(mask);
+    free(helper);
+}
+
+void puf_format_challenge(int response_index, const char *device_id, char *challenge, size_t challenge_size) {
+    snprintf(challenge, challenge_size, "%s%d@%s", PUF_CHALLENGE_PREFIX, response_index, device_id);
 }
 
 /**
- * @brief Generates a Strong PUF response by eliminating unreliable bits.
- * @details Implements the response construction described by Vatajelu et al.:
- * "By eliminating these bits [unreliable] from the PUF response, its reliability is greatly improved".
- * The challenge acts as a seed to select bits ONLY from the reliable regions defined by the mask.
+ * @brief Maps a challenge to the index of the group of cells that answers it.
+ * @details A challenge issued by the Coordinator names the index explicitly. Any other string is
+ * mapped to an index by hashing, so that it is still answered deterministically.
+ */
+static int puf_challenge_to_index(const uint8_t *challenge, size_t challenge_len) {
+    size_t prefix_len = strlen(PUF_CHALLENGE_PREFIX);
+    if (challenge_len > prefix_len && memcmp(challenge, PUF_CHALLENGE_PREFIX, prefix_len) == 0) {
+        int index = 0;
+        size_t i = prefix_len;
+        while (i < challenge_len && challenge[i] >= '0' && challenge[i] <= '9' && index < 100000) {
+            index = index * 10 + (challenge[i] - '0');
+            i++;
+        }
+        if (i > prefix_len && i < challenge_len && challenge[i] == '@') {
+            return index;
+        }
+    }
+
+    uint32_t hash = 2166136261u;
+    for (size_t i = 0; i < challenge_len; i++) {
+        hash = (hash ^ challenge[i]) * 16777619u;
+    }
+    return (int)(hash % PUF_RESPONSE_CAPACITY);
+}
+
+/**
+ * @brief Computes the response of the SRAM PUF to a challenge.
+ * @details The challenge selects a group of retained cells that no other challenge reads. The
+ * response is the SHA-256 digest of those cells, truncated to RESPONSE_BITS: every bit of the
+ * input is the start-up value of a physical cell of this device, and the digest only condenses
+ * the entropy that the public helper data leaves in them.
  * @param challenge The input challenge bytes.
  * @param challenge_len Length of the challenge.
  * @param response Output buffer (at least 64 bytes) for the response string.
  */
 void simulate_puf_response(const uint8_t *challenge, size_t challenge_len, char *response) {
-    uint8_t hmac_output[32];
-    uint8_t *key = (uint8_t *)sram_fingerprint;
+    static const char *label = "SRAFT-PUF-RESPONSE";
+    uint8_t cells[PUF_RESPONSE_CELL_BYTES];
+    uint8_t digest[32];
+    size_t digest_len = 0;
 
-    psa_key_attributes_t key_attr = PSA_KEY_ATTRIBUTES_INIT;
-    psa_set_key_usage_flags(&key_attr, PSA_KEY_USAGE_SIGN_MESSAGE);
-    psa_set_key_algorithm(&key_attr, PSA_ALG_HMAC(PSA_ALG_SHA_256));
-    psa_set_key_type(&key_attr, PSA_KEY_TYPE_HMAC);
-    psa_key_id_t hmac_key_id;
-    psa_import_key(&key_attr, key, SRAM_PUF_SIZE_WORDS * 4, &hmac_key_id);
-
-    size_t hmac_output_len = 0;
-    psa_mac_operation_t mac_op = PSA_MAC_OPERATION_INIT;
-    psa_mac_sign_setup(&mac_op, hmac_key_id, PSA_ALG_HMAC(PSA_ALG_SHA_256));
-    psa_mac_update(&mac_op, challenge, challenge_len);
-    psa_mac_sign_finish(&mac_op, hmac_output, sizeof(hmac_output), &hmac_output_len);
-    psa_destroy_key(hmac_key_id);
-
-    uint32_t selected_bits = 0;
-    uint32_t total_bits = SRAM_PUF_SIZE_WORDS * 32;
-    uint32_t iterator_seed = 0;
-    memcpy(&iterator_seed, hmac_output, sizeof(uint32_t));
-    uint32_t current_bit_idx = iterator_seed % total_bits;
-    
-    for (int k = 0; k < RESPONSE_BITS; k++) {
-        bool bit_found = false;
-        
-        for (int scan = 0; scan < total_bits; scan++) {
-            uint32_t word_idx = current_bit_idx / 32;
-            uint32_t bit_offset = current_bit_idx % 32;
-            
-            if ((reliability_mask[word_idx] >> bit_offset) & 1) {
-                uint32_t bit_val = (sram_fingerprint[word_idx] >> bit_offset) & 1;
-                selected_bits = (selected_bits << 1) | bit_val;
-                
-                current_bit_idx = (current_bit_idx + 1) % total_bits;
-                bit_found = true;
-                break;
-            }
-            
-            current_bit_idx = (current_bit_idx + 1) % total_bits;
-        }
-        
-        if (!bit_found) {
-            ESP_LOGE(TAG, "Critical: Not enough reliable bits in PUF!");
-            break;
-        }
+    int response_index = puf_challenge_to_index(challenge, challenge_len);
+    if (!puf_initialized ||
+        !puf_extractor_response_cells(puf_cells, puf_failed_blocks, puf_total_blocks, response_index, cells)) {
+        ESP_LOGE(TAG, "The SRAM-PUF cannot answer response index %d.", response_index);
+        snprintf(response, 64, "UNAVAILABLE");
+        return;
     }
-    
-    snprintf(response, 64, "R%08" PRIX32, selected_bits);
+
+    uint8_t index_bytes[4] = {(uint8_t)response_index, (uint8_t)(response_index >> 8), (uint8_t)(response_index >> 16), (uint8_t)(response_index >> 24)};
+    psa_hash_operation_t op = PSA_HASH_OPERATION_INIT;
+    psa_status_t status = psa_hash_setup(&op, PSA_ALG_SHA_256);
+    if (status == PSA_SUCCESS) status = psa_hash_update(&op, (const uint8_t *)label, strlen(label));
+    if (status == PSA_SUCCESS) status = psa_hash_update(&op, index_bytes, sizeof(index_bytes));
+    if (status == PSA_SUCCESS) status = psa_hash_update(&op, cells, sizeof(cells));
+    if (status == PSA_SUCCESS) status = psa_hash_finish(&op, digest, sizeof(digest), &digest_len);
+    memset(cells, 0, sizeof(cells));
+    if (status != PSA_SUCCESS) {
+        psa_hash_abort(&op);
+        snprintf(response, 64, "UNAVAILABLE");
+        return;
+    }
+
+    // "R" followed by the response in hexadecimal: 1 + RESPONSE_BITS / 4 characters.
+    response[0] = 'R';
+    for (int i = 0; i < RESPONSE_BITS / 8; i++) {
+        snprintf(response + 1 + i * 2, 3, "%02X", digest[i]);
+    }
 }
 
 /**
@@ -515,4 +567,40 @@ uint32_t secure_rand_range(uint32_t max) {
     } while (random_val >= rejection_threshold);
 
     return random_val % max;
+}
+
+void log_heap(const char *where) {
+#if CONFIG_LOG_MAXIMUM_LEVEL < 3
+    // Release profile: no diagnostics.
+    (void)where;
+    return;
+#endif
+    ESP_LOGI("HEAP", "%s: free %u, largest block %u, minimum ever %u", where,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
+}
+
+void log_task_stacks(void) {
+#if CONFIG_LOG_MAXIMUM_LEVEL < 3
+    // Release profile: no diagnostics.
+    return;
+#endif
+    UBaseType_t count = uxTaskGetNumberOfTasks();
+    TaskStatus_t *tasks = malloc(count * sizeof(TaskStatus_t));
+    if (!tasks) return;
+    count = uxTaskGetSystemState(tasks, count, NULL);
+    char line[256];
+    int len = 0;
+    for (UBaseType_t i = 0; i < count; i++) {
+        int n = snprintf(line + len, sizeof(line) - len, "%s=%u ", tasks[i].pcTaskName, (unsigned)tasks[i].usStackHighWaterMark);
+        if (n < 0 || n >= (int)(sizeof(line) - len)) {
+            ESP_LOGI("STACKS", "%s", line);
+            len = 0;
+            n = snprintf(line, sizeof(line), "%s=%u ", tasks[i].pcTaskName, (unsigned)tasks[i].usStackHighWaterMark);
+        }
+        len += n;
+    }
+    if (len > 0) ESP_LOGI("STACKS", "%s", line);
+    free(tasks);
 }

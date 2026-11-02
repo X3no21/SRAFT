@@ -1,0 +1,128 @@
+{
+  "timestamp": "2026-10-22T11:42:10.969510+00:00",
+  "nodes": 7,
+  "runs_per_variant": 10,
+  "image": "build_attack",
+  "coordinator": "192.168.1.176",
+  "attacker": "192.168.1.103",
+  "prover": "192.168.1.110",
+  "scenarios": {
+    "A_replay_modification": {
+      "section": "5.1",
+      "property": "A modified request is refused and a replayed request (seen nonce) is dropped",
+      "violation": "the Prover answered a modified request, or answered a replayed one twice",
+      "modified_refused": 10,
+      "modified_total": 10,
+      "replay_dropped": 10,
+      "replay_total": 10
+    },
+    "B_chosen_challenge": {
+      "section": "5.2",
+      "property": "A Prover answers only a request that proves knowledge of the response",
+      "violation": "the Prover answered a request with an invalid proof",
+      "invalid_refused": 10,
+      "invalid_total": 10,
+      "genuine_answered": 10,
+      "genuine_total": 10
+    },
+    "C_capture_collusion": {
+      "section": "5.3",
+      "property": "Authentication succeeds only with the enrolled response, not with another credential",
+      "violation": "an authentication succeeded with a response other than the enrolled one",
+      "impersonation_rejected": 10,
+      "impersonation_total": 10,
+      "genuine_accepted": 10,
+      "genuine_total": 10
+    },
+    "C_exposure": {
+      "verifiers_per_prover": 3,
+      "rows": [
+        {
+          "compromised_verifiers": 0,
+          "exposed_shards": 0,
+          "honest_paths_left": 3,
+          "prover_still_verifiable": true
+        },
+        {
+          "compromised_verifiers": 1,
+          "exposed_shards": 1,
+          "honest_paths_left": 2,
+          "prover_still_verifiable": true
+        },
+        {
+          "compromised_verifiers": 2,
+          "exposed_shards": 2,
+          "honest_paths_left": 1,
+          "prover_still_verifiable": true
+        },
+        {
+          "compromised_verifiers": 3,
+          "exposed_shards": 3,
+          "honest_paths_left": 0,
+          "prover_still_verifiable": false
+        }
+      ]
+    },
+    "D_coordinator_removal": {
+      "section": "5.4",
+      "property": "An unconfirmed removal order leaves honest Verifiers' shards in place",
+      "violation": "an honest Verifier of the target discarded its shard on an unconfirmed order",
+      "runs": [
+        {
+          "coordinator": "192.168.1.176",
+          "target": "192.168.1.103",
+          "recipients": 5,
+          "kept_target": 3,
+          "removed_target": 2,
+          "membership_diverged": true,
+          "target_still_authenticates": true
+        },
+        {
+          "coordinator": "192.168.1.103",
+          "target": "192.168.1.110",
+          "recipients": 5,
+          "kept_target": 3,
+          "removed_target": 2,
+          "membership_diverged": true,
+          "target_still_authenticates": true
+        },
+        {
+          "coordinator": "192.168.1.103",
+          "target": "192.168.1.110",
+          "recipients": 5,
+          "kept_target": 3,
+          "removed_target": 2,
+          "membership_diverged": true,
+          "target_still_authenticates": true
+        },
+        {
+          "coordinator": "192.168.1.110",
+          "target": "192.168.1.103",
+          "recipients": 5,
+          "kept_target": 3,
+          "removed_target": 2,
+          "membership_diverged": true,
+          "target_still_authenticates": true
+        },
+        {
+          "coordinator": "192.168.1.59",
+          "target": "192.168.1.103",
+          "recipients": 5,
+          "kept_target": 3,
+          "removed_target": 2,
+          "membership_diverged": true,
+          "target_still_authenticates": true
+        }
+      ]
+    },
+    "E_forged_messages": {
+      "section": "5.4",
+      "property": "Forged coordination messages do not install an unauthorized Coordinator",
+      "violation": "a forged heartbeat installed the attacker as Coordinator",
+      "tampered_claim_refused": 5,
+      "tampered_claim_total": 5,
+      "outsider_injection_dropped": 5,
+      "outsider_injection_total": 5
+    }
+  }
+}

@@ -4,6 +4,7 @@
  * ============================= */
 
 #include "hatt_protocol.h"
+#include "attestation_test_region.h"
 #include <string.h>
 #include <stdlib.h>
 #include "freertos/FreeRTOS.h"
@@ -12,6 +13,11 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_random.h"
+#include "esp_timer.h"
+#include "esp_partition.h"
+#include "esp_ota_ops.h"
+#include "esp_image_format.h"
+#include "freertos/semphr.h"
 #include "psa/crypto.h"
 #include "lwip/err.h"
 #include "lwip/sockets.h"
@@ -19,26 +25,27 @@
 #include <lwip/netdb.h>
 #include "utility.h"
 #include "auth_db.h"
+#include "auth_join.h"
+#include "raft_state.h"
 
 static const char *TAG = "HATT_PROTOCOL";
 
-static uint8_t SHARED_HATT_CHALLENGE[HATT_CHALLENGE_SIZE_BYTES] = {
-    0x1A, 0x9F, 0x3E, 0x8B, 0xC7, 0x2D, 0x6F, 0x5A,
-    0x4D, 0x8A, 0x9B, 0x0C, 0x1D, 0xEF, 0x4A, 0x7B
-};
+// Part of the network-access credential provisioned to every device (A1), in the gitignored
+// main/esp32_config/network_secret.h. It keys the attestations made by a device that holds no CRP
+// of the Prover (voters, checks of the Coordinator).
+#if __has_include("network_secret.h")
+#include "network_secret.h"
+#endif
+#ifndef SRAFT_NETWORK_SECRET
+#warning "network_secret.h not found: the attestations without a CRP use a placeholder secret (see README)"
+#define SRAFT_NETWORK_SECRET { 0x5A }
+#endif
+static const uint8_t NETWORK_SECRET[HATT_HASH_SIZE_BYTES] = SRAFT_NETWORK_SECRET;
 
-static bool force_tamper_memory = false;
 
-/**
- * @brief Simulates a tampered memory state for testing purposes.
- * @details This function is used to force the Prover to simulate a tampered memory state,
- * which is useful for testing the integrity verification process.
- * @return void
- */
-void hatt_test_tamper_secret(void) {
-    ESP_LOGW(TAG, "!!! TAMPERING HATT MEMORY SIMULATION FOR TEST !!!");
-    force_tamper_memory = true;
-}
+static SemaphoreHandle_t hatt_mem_mutex = NULL;
+static SemaphoreHandle_t hatt_sigma_mutex = NULL;
+static portMUX_TYPE hatt_block_lock = portMUX_INITIALIZER_UNLOCKED;
 
 /**
  * @brief Computes SHA256 hash over multiple data chunks.
@@ -87,6 +94,25 @@ static void hatt_hmac_sha256(const uint8_t *key, const uint8_t **data_chunks, co
     size_t mac_len = 0;
     psa_mac_sign_finish(&op, output_mac, HATT_HASH_SIZE_BYTES, &mac_len);
     psa_destroy_key(key_id);
+}
+
+/**
+ * @brief Key of an attestation made by a device that holds no CRP of the Prover.
+ * @details It is derived from the network secret and from the identities of the two devices. The Prover
+ * always uses its own identity, so a device that forwards a request to another device does not obtain a
+ * proof valid for itself, and a device without the network secret cannot complete the exchange.
+ * @param verifier_id Identity of the attesting device.
+ * @param prover_id Identity of the attested device.
+ * @param out Buffer of HATT_PUF_RESPONSE_SIZE_BYTES bytes, used in place of the PUF response.
+ */
+static void hatt_network_response(const char *verifier_id, const char *prover_id, uint8_t *out) {
+    static const char label[] = "SRAFT-HATT-NETWORK";
+    // The terminating zeros separate the fields.
+    const uint8_t *chunks[] = {(const uint8_t *)label, (const uint8_t *)verifier_id, (const uint8_t *)prover_id};
+    const size_t sizes[] = {sizeof(label), strlen(verifier_id) + 1, strlen(prover_id) + 1};
+    uint8_t mac[HATT_HASH_SIZE_BYTES];
+    hatt_hmac_sha256(NETWORK_SECRET, chunks, sizes, 3, mac);
+    memcpy(out, mac, HATT_PUF_RESPONSE_SIZE_BYTES);
 }
 
 /**
@@ -189,62 +215,194 @@ static void prng_seed(uint32_t* state, const uint8_t* seed_data_1, size_t size1,
 }
 
 static uint32_t prng_get_random(uint32_t* state) {
-    *state = (1103515245 * (*state) + 12345) & 0x7FFFFFFF;
-    return *state;
+    uint32_t x = *state ? *state : 0x9E3779B9u;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *state = x;
+    return x;
 }
 
-static void hatt_compute_sigma(uint8_t *sigma_output, const uint8_t *memory, const uint8_t *puf_response_r, const uint8_t *s_beta, const uint8_t *s_omega, uint32_t* prng_state_ptr) {
-    uint8_t xor_seed[HATT_SEED_SIZE_BYTES];
-    for(int i=0; i < HATT_SEED_SIZE_BYTES; i++) {
-        xor_seed[i] = s_beta[i] ^ puf_response_r[i];
-    }
-    prng_seed(prng_state_ptr, xor_seed, sizeof(xor_seed), NULL, 0);
+static uint32_t hatt_mix32(uint32_t x) {
+    x ^= x >> 16; x *= 0x85EBCA6Bu;
+    x ^= x >> 13; x *= 0xC2B2AE35u;
+    x ^= x >> 16;
+    return x;
+}
 
-    const int num_blocks = HATT_MEMORY_SIZE_BYTES / HATT_MEMORY_BLOCK_SIZE_BYTES;
-    int *rho = malloc(num_blocks * sizeof(int));
-    if (!rho) return;
-    
-    for (int i = 0; i < num_blocks; ++i) rho[i] = i;
-    for (int i = num_blocks - 1; i > 0; i--) {
-        int j = prng_get_random(prng_state_ptr) % (i + 1);
-        int temp = rho[i]; rho[i] = rho[j]; rho[j] = temp;
-    }
-
-    int sigma_bit_idx = 0;
-    memset(sigma_output, 0, HATT_SIGMA_SIZE_BYTES);
-
-    for (int i = 0; i < num_blocks; ++i) {
-        int block_idx = rho[i];
-        
-        uint8_t rho_i_bytes[sizeof(int)];
-        memcpy(rho_i_bytes, &rho[i], sizeof(int));
-        for(int k=0; k < HATT_SEED_SIZE_BYTES; k++) {
-            xor_seed[k] = s_omega[k] ^ rho_i_bytes[k % sizeof(int)];
+/**
+ * @brief Keyed permutation of the block numbers 0..n-1 (Feistel network with cycle walking).
+ * @details It gives the i-th element of the permutation rho without storing rho, so that a
+ * measurement needs no memory proportional to the number of blocks.
+ */
+static uint32_t hatt_permute(uint32_t i, uint32_t n, uint32_t half_bits, uint32_t key) {
+    const uint32_t mask = (1u << half_bits) - 1;
+    uint32_t x = i;
+    do {
+        uint32_t l = x >> half_bits, r = x & mask;
+        for (uint32_t round = 0; round < 4; round++) {
+            uint32_t f = hatt_mix32(key + r * 0x9E3779B1u + round) & mask;
+            uint32_t t = l ^ f;
+            l = r;
+            r = t;
         }
-        prng_seed(prng_state_ptr, xor_seed, sizeof(xor_seed), NULL, 0);
+        x = (l << half_bits) | r;
+    } while (x >= n);
+    return x;
+}
 
-        const int total_bits_in_block = HATT_MEMORY_BLOCK_SIZE_BYTES * 8;
-        int *omega = malloc(total_bits_in_block * sizeof(int));
-        if (!omega) continue;
-        
-        for (int j = 0; j < total_bits_in_block; ++j) omega[j] = j;
-        for (int j = total_bits_in_block - 1; j > 0; j--) {
-            int k = prng_get_random(prng_state_ptr) % (j + 1);
-            int temp = omega[j]; omega[j] = omega[k]; omega[k] = temp;
-        }
+/**
+ * @brief Maps the firmware image of the running application, i.e., the memory attested by HAtt.
+ * @details The image is mapped once and the mapping is kept. Every device runs the same firmware,
+ * so a Verifier uses its own image as the reference copy of the memory of the Prover.
+ * @param image Output pointer to the first byte of the image.
+ * @param image_len Output length of the image in bytes.
+ * @return true if the image is available, false otherwise.
+ */
+static bool hatt_get_attested_memory(const uint8_t **image, size_t *image_len) {
+    static const uint8_t *mapped = NULL;
+    static size_t mapped_len = 0;
 
-        const uint8_t *block_ptr = memory + (block_idx * HATT_MEMORY_BLOCK_SIZE_BYTES);
-        for (int j = 0; j < HATT_BITS_PER_BLOCK_TO_SAMPLE; ++j) {
-            int bit_idx = omega[j];
-            bool val = (block_ptr[bit_idx / 8] >> (bit_idx % 8)) & 1;
-            if (val) {
-                sigma_output[sigma_bit_idx / 8] |= (1 << (sigma_bit_idx % 8));
+    if (!hatt_mem_mutex || !hatt_sigma_mutex) return false;
+    xSemaphoreTake(hatt_mem_mutex, portMAX_DELAY);
+    if (!mapped) {
+        const esp_partition_t *part = esp_ota_get_running_partition();
+        esp_image_metadata_t meta;
+        const void *ptr = NULL;
+        esp_partition_mmap_handle_t handle;
+        if (part) {
+            const esp_partition_pos_t pos = { .offset = part->address, .size = part->size };
+            if (esp_image_get_metadata(&pos, &meta) == ESP_OK && meta.image_len > 0 && meta.image_len <= part->size &&
+                esp_partition_mmap(part, 0, meta.image_len, ESP_PARTITION_MMAP_DATA, &ptr, &handle) == ESP_OK) {
+                mapped = ptr;
+                mapped_len = meta.image_len;
+                // The SHA-256 digest appended to the image is derived from the image itself and is not
+                // checked at run time, so it is not attested: a modification is detected only through
+                // the code and data it changes.
+                if (meta.image.hash_appended && mapped_len > HATT_HASH_SIZE_BYTES) {
+                    mapped_len -= HATT_HASH_SIZE_BYTES;
+                }
+                ESP_LOGI(TAG, "Attested memory: firmware image of %u bytes, %u blocks of %d words.",
+                         (unsigned)mapped_len, (unsigned)((mapped_len + HATT_MEMORY_BLOCK_SIZE_BYTES - 1) / HATT_MEMORY_BLOCK_SIZE_BYTES),
+                         HATT_WORDS_PER_BLOCK);
             }
-            sigma_bit_idx++;
         }
-        free(omega);
     }
-    free(rho);
+    xSemaphoreGive(hatt_mem_mutex);
+
+    if (!mapped) {
+        ESP_LOGE(TAG, "Cannot access the firmware image to attest.");
+        return false;
+    }
+    *image = mapped;
+    *image_len = mapped_len;
+    return true;
+}
+
+/**
+ * @brief Computes the verification bits of HAtt over the firmware image.
+ * @details The image is divided in blocks of HATT_WORDS_PER_BLOCK words. In each iteration the blocks are visited
+ * in the order given by a permutation seeded with S_beta xor R, and HATT_BITS_PER_WORD bits are read from every
+ * word of a block at positions drawn from a generator seeded with S_omega xor the block number. The bits of all
+ * iterations form the string sigma, which is compressed with SHA-256 so that the proof has a fixed size.
+ * @param sigma_output Buffer of HATT_SIGMA_SIZE_BYTES that receives the digest of sigma.
+ * @return true on success, false if the image cannot be read.
+ */
+static bool hatt_compute_sigma(uint8_t *sigma_output, const uint8_t *puf_response_r, const uint8_t *s_beta, const uint8_t *s_omega, uint32_t* prng_state_ptr) {
+    const int64_t wait_start_us = esp_timer_get_time();
+    const uint8_t *image = NULL;
+    size_t image_len = 0;
+    if (!hatt_get_attested_memory(&image, &image_len)) return false;
+
+    const size_t num_blocks = (image_len + HATT_MEMORY_BLOCK_SIZE_BYTES - 1) / HATT_MEMORY_BLOCK_SIZE_BYTES;
+    if (num_blocks < 2) return false;
+    uint32_t half_bits = 1;
+    while ((1ull << (2 * half_bits)) < num_blocks) half_bits++;
+
+    // One measurement at a time on a device; the others wait their turn.
+    xSemaphoreTake(hatt_sigma_mutex, portMAX_DELAY);
+    const int64_t measure_start_us = esp_timer_get_time();
+
+    uint8_t xor_beta[HATT_SEED_SIZE_BYTES];
+    for (int i = 0; i < HATT_SEED_SIZE_BYTES; i++) xor_beta[i] = s_beta[i] ^ puf_response_r[i];
+
+    psa_hash_operation_t op = PSA_HASH_OPERATION_INIT;
+    psa_hash_setup(&op, PSA_ALG_SHA_256);
+    uint8_t bits[64];
+    size_t bit_idx = 0;
+    memset(bits, 0, sizeof(bits));
+
+    for (uint8_t iter = 0; iter < HATT_ITERATIONS; iter++) {
+        // Permutation rho of the block numbers, seeded with S_beta xor R.
+        prng_seed(prng_state_ptr, xor_beta, sizeof(xor_beta), &iter, sizeof(iter));
+        const uint32_t rho_key = *prng_state_ptr;
+
+        uint32_t omega_base = 0;
+        prng_seed(&omega_base, s_omega, HATT_SEED_SIZE_BYTES, &iter, sizeof(iter));
+
+        for (size_t i = 0; i < num_blocks; ++i) {
+            const uint32_t rho_i = hatt_permute((uint32_t)i, (uint32_t)num_blocks, half_bits, rho_key);
+            const size_t block_off = (size_t)rho_i * HATT_MEMORY_BLOCK_SIZE_BYTES;
+            // Generator of the bit positions Omega, seeded with S_omega xor rho_i.
+            uint32_t omega_state = hatt_mix32(omega_base ^ rho_i);
+            uint8_t block[HATT_MEMORY_BLOCK_SIZE_BYTES];
+            size_t avail = image_len - block_off;
+            if (avail > sizeof(block)) avail = sizeof(block);
+
+            // The measurement of a block is not interrupted, as required by HAtt.
+            portENTER_CRITICAL(&hatt_block_lock);
+            memcpy(block, image + block_off, avail);
+            portEXIT_CRITICAL(&hatt_block_lock);
+            if (avail < sizeof(block)) memset(block + avail, 0, sizeof(block) - avail);
+
+            for (int w = 0; w < HATT_WORDS_PER_BLOCK; ++w) {
+                uint32_t word;
+                memcpy(&word, block + w * HATT_WORD_SIZE_BYTES, sizeof(word));
+                for (int b = 0; b < HATT_BITS_PER_WORD; ++b) {
+                    uint32_t pos = prng_get_random(&omega_state) >> 27;
+                    if ((word >> pos) & 1u) bits[bit_idx / 8] |= (uint8_t)(1u << (bit_idx % 8));
+                    if (++bit_idx == sizeof(bits) * 8) {
+                        psa_hash_update(&op, bits, sizeof(bits));
+                        memset(bits, 0, sizeof(bits));
+                        bit_idx = 0;
+                    }
+                }
+            }
+        }
+        vTaskDelay(1);
+    }
+
+    if (bit_idx > 0) psa_hash_update(&op, bits, (bit_idx + 7) / 8);
+    size_t hash_len = 0;
+    psa_status_t st = psa_hash_finish(&op, sigma_output, HATT_SIGMA_SIZE_BYTES, &hash_len);
+
+    xSemaphoreGive(hatt_sigma_mutex);
+    ESP_LOGI(TAG, "HATT_STAT measure blocks=%u wait_ms=%lld measure_ms=%lld", (unsigned)num_blocks,
+             (long long)((measure_start_us - wait_start_us) / 1000), (long long)((esp_timer_get_time() - measure_start_us) / 1000));
+    return st == PSA_SUCCESS;
+}
+
+/**
+ * @brief Reads exactly len bytes from a socket.
+ * @return true if all the bytes were read, false on error, timeout, or closed connection.
+ */
+static bool hatt_read_full(int sock, void *buf, size_t len) {
+    size_t done = 0;
+    while (done < len) {
+        int n = read(sock, (uint8_t *)buf + done, len - done);
+        if (n <= 0) return false;
+        done += (size_t)n;
+    }
+    return true;
+}
+
+uint32_t hatt_measurement_timeout_ms(void) {
+    // During the bootstrap the network state is still empty, so the devices known to Raft are counted too.
+    int devices = db_get_node_count();
+    int peers = raft_state_get_peer_count();
+    if (peers > devices) devices = peers;
+    if (devices < 1) devices = 1;
+    return HATT_SOCKET_TIMEOUT_S * 1000u + (uint32_t)devices * HATT_MEASUREMENT_BUDGET_MS;
 }
 
 /**
@@ -256,11 +414,6 @@ static void hatt_compute_sigma(uint8_t *sigma_output, const uint8_t *memory, con
 static void prover_init(ProverState_t *s, const char* my_ip) {
     strncpy(s->device_id, my_ip, HATT_MAX_ID_LEN -1);
     s->device_id[HATT_MAX_ID_LEN - 1] = '\0';
-    for (int i = 0; i < HATT_MEMORY_SIZE_BYTES; ++i) s->memory[i] = (uint8_t)i;
-    
-    if (force_tamper_memory) {
-        s->memory[0] ^= 0xFF;
-    }
     esp_read_mac(s->puf_secret, ESP_MAC_WIFI_STA);
 }
 
@@ -276,7 +429,6 @@ static void verifier_init(VerifierState_t *s, const char* my_ip, const char* pro
     s->verifier_id[HATT_MAX_ID_LEN - 1] = '\0';
     strncpy(s->prover_id_on_record, prover_ip, HATT_MAX_ID_LEN - 1);
     s->prover_id_on_record[HATT_MAX_ID_LEN - 1] = '\0';
-    for (int i = 0; i < HATT_MEMORY_SIZE_BYTES; ++i) s->prover_golden_image[i] = (uint8_t)i;
 }
 
 /**
@@ -297,8 +449,10 @@ static void verifier_create_message1(VerifierState_t *s, Message1_t *m1) {
     
     hatt_kdf(s->puf_response_r, k_enc, k_mac); 
 
+    memset(m1, 0, sizeof(Message1_t));
     strncpy(m1->verifier_id, s->verifier_id, HATT_MAX_ID_LEN -1);
     m1->verifier_id[HATT_MAX_ID_LEN-1] = '\0';
+    strncpy(m1->challenge, s->challenge, HATT_MAX_CHALLENGE_LEN - 1);
     memcpy(m1->nonce_n_id, nid, sizeof(nid));
     
     const uint8_t *pc[] = {(uint8_t *)s->prover_id_on_record, s->puf_response_r, nid};
@@ -353,7 +507,7 @@ static bool verifier_handle_message2(VerifierState_t *s, const Message2_t *m2, M
  * @param m4 Pointer to the received Message4_t.
  * @return true if Message 4 is valid and the attestation succeeds, false otherwise.
  */
-static bool verifier_handle_message4(VerifierState_t *s, const Message4_t *m4) {
+static hatt_result_t verifier_handle_message4(VerifierState_t *s, const Message4_t *m4) {
     uint8_t k_enc[HATT_HASH_SIZE_BYTES], k_mac[HATT_HASH_SIZE_BYTES];
     hatt_kdf(s->puf_response_r, k_enc, k_mac);
 
@@ -362,19 +516,17 @@ static bool verifier_handle_message4(VerifierState_t *s, const Message4_t *m4) {
     uint8_t i4_recalculated[HATT_HASH_SIZE_BYTES];
     hatt_hmac_sha256(k_mac, i4c, i4cs, 4, i4_recalculated);
 
-    if (memcmp(i4_recalculated, m4->auth_tag_i4, HATT_HASH_SIZE_BYTES) != 0) return false;
+    // A message whose tag is not valid may come from anyone, so it proves nothing about the Prover.
+    if (memcmp(i4_recalculated, m4->auth_tag_i4, HATT_HASH_SIZE_BYTES) != 0) return HATT_NO_ANSWER;
 
     uint8_t iv[16] = {0};
     uint8_t m4_decrypted[sizeof(m4->encrypted_payload)];
-    if (hatt_aes_crypt(false, k_enc, iv, m4->encrypted_payload, sizeof(m4->encrypted_payload), m4_decrypted) != 0) return false;
+    if (hatt_aes_crypt(false, k_enc, iv, m4->encrypted_payload, sizeof(m4->encrypted_payload), m4_decrypted) != 0) return HATT_NO_ANSWER;
 
-    uint8_t prover_sigma[HATT_SIGMA_SIZE_BYTES];
-    memcpy(prover_sigma, m4_decrypted, HATT_SIGMA_SIZE_BYTES);
-    
-    uint8_t verifier_sigma[HATT_SIGMA_SIZE_BYTES];
-    hatt_compute_sigma(verifier_sigma, s->prover_golden_image, s->puf_response_r, s->s_beta, s->s_omega, &s->prng_state);
+    if (!s->expected_sigma_ready) return HATT_NO_ANSWER;
 
-    return (memcmp(prover_sigma, verifier_sigma, HATT_SIGMA_SIZE_BYTES) == 0);
+    // The proof is authentic: the attestation is decided by comparing it with the expected one.
+    return (memcmp(m4_decrypted, s->expected_sigma, HATT_SIGMA_SIZE_BYTES) == 0) ? HATT_PASSED : HATT_FAILED;
 }
 
 /**
@@ -389,18 +541,26 @@ static bool prover_handle_message1(ProverState_t *s, const Message1_t *m1, Messa
     uint8_t k_enc[HATT_HASH_SIZE_BYTES], k_mac[HATT_HASH_SIZE_BYTES];
     uint8_t iv[16] = {0};
     
-    uint8_t challenge_to_use[HATT_CHALLENGE_SIZE_BYTES];
-    memcpy(challenge_to_use, SHARED_HATT_CHALLENGE, HATT_CHALLENGE_SIZE_BYTES);
+    // The Verifier names the challenge it holds. The Prover uses it only if the network state
+    // assigns that challenge to that Verifier; the response itself never leaves the device.
+    char named_challenge[HATT_MAX_CHALLENGE_LEN];
+    memcpy(named_challenge, m1->challenge, HATT_MAX_CHALLENGE_LEN);
+    named_challenge[HATT_MAX_CHALLENGE_LEN - 1] = '\0';
 
-    bool specific_challenge_found = db_get_challenge_for_verifier(m1->verifier_id, (char*)challenge_to_use, HATT_CHALLENGE_SIZE_BYTES);
-
-    if (specific_challenge_found) {
-        ESP_LOGI(TAG, "Using specific challenge from DB for verifier %s", m1->verifier_id);
+    if (named_challenge[0] != '\0' &&
+        (db_cnode_exists(named_challenge, s->device_id, m1->verifier_id) || join_is_pending_challenge(m1->verifier_id, named_challenge))) {
+        ESP_LOGI(TAG, "Using the challenge named by verifier %s", m1->verifier_id);
+        char full_response[64] = {0};
+        simulate_puf_response((const uint8_t *)named_challenge, strlen(named_challenge), full_response);
         memset(s->puf_response_r, 0, sizeof(s->puf_response_r));
-        simulate_puf_response(challenge_to_use, HATT_CHALLENGE_SIZE_BYTES, (char *)s->puf_response_r);
+        strncpy((char *)s->puf_response_r, full_response, HATT_PUF_RESPONSE_SIZE_BYTES);
     } else {
-        ESP_LOGW(TAG, "No specific challenge found for verifier %s, using default shared challenge (BOOTSTRAP MODE).", m1->verifier_id);
-        memcpy(s->puf_response_r, SHARED_HATT_CHALLENGE, HATT_PUF_RESPONSE_SIZE_BYTES);
+        ESP_LOGW(TAG, "No assigned challenge named by verifier %s, using the network key.", m1->verifier_id);
+        char verifier_id[HATT_MAX_ID_LEN];
+        memcpy(verifier_id, m1->verifier_id, sizeof(verifier_id));
+        verifier_id[sizeof(verifier_id) - 1] = '\0';
+        memset(s->puf_response_r, 0, sizeof(s->puf_response_r));
+        hatt_network_response(verifier_id, s->device_id, s->puf_response_r);
     }
     
     hatt_kdf(s->puf_response_r, k_enc, k_mac);
@@ -458,7 +618,7 @@ static bool prover_handle_message3(ProverState_t *s, const Message3_t *m3, const
     if (memcmp(i3_recalculated, m3->auth_tag_i3, HATT_HASH_SIZE_BYTES) != 0) return false;
 
     uint8_t prover_sigma[HATT_SIGMA_SIZE_BYTES];
-    hatt_compute_sigma(prover_sigma, s->memory, s->puf_response_r, s->s_beta, s->s_omega, &s->prng_state);
+    if (!hatt_compute_sigma(prover_sigma, s->puf_response_r, s->s_beta, s->s_omega, &s->prng_state)) return false;
 
     uint8_t m4_plaintext[sizeof(m4->encrypted_payload)];
     uint8_t iv[16] = {0};
@@ -501,14 +661,14 @@ static void handle_prover_session(const int sock) {
     prover_init(prover_state, my_ip);
 
     ESP_LOGI(TAG, "Prover session started on socket %d", sock);
-    if (read(sock, msg1, sizeof(Message1_t)) <= 0) { ESP_LOGE(TAG, "Prover: read Message1 failed."); goto CLEAN_UP; }
+    if (!hatt_read_full(sock, msg1, sizeof(Message1_t))) { ESP_LOGE(TAG, "Prover: read Message1 failed."); goto CLEAN_UP; }
     
     if (!prover_handle_message1(prover_state, msg1, msg2)) { ESP_LOGE(TAG, "Prover: Failed to process Message 1."); goto CLEAN_UP; }
     
     if (write(sock, msg2, sizeof(Message2_t)) <= 0) { ESP_LOGE(TAG, "Prover: write Message2 failed."); goto CLEAN_UP; }
     ESP_LOGD(TAG, "Prover: Sent Message 2.");
     
-    if (read(sock, msg3, sizeof(Message3_t)) <= 0) { ESP_LOGE(TAG, "Prover: read Message3 failed."); goto CLEAN_UP; }
+    if (!hatt_read_full(sock, msg3, sizeof(Message3_t))) { ESP_LOGE(TAG, "Prover: read Message3 failed."); goto CLEAN_UP; }
     
     if (!prover_handle_message3(prover_state, msg3, msg1->verifier_id, msg4)) { ESP_LOGE(TAG, "Prover: Failed to process Message 3."); goto CLEAN_UP; }
     
@@ -535,12 +695,14 @@ CLEAN_UP:
  * to an integer (`int`).
  * @return void
  */
-static void prover_session_task(void *pvParameters) {
-    int sock = (int)pvParameters;
+static void prover_session_task_body(int sock) {
+    // A Verifier that opens a session and then stays silent must not keep it open forever.
+    struct timeval io_timeout = { .tv_sec = HATT_SOCKET_TIMEOUT_S, .tv_usec = 0 };
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &io_timeout, sizeof(io_timeout));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &io_timeout, sizeof(io_timeout));
     handle_prover_session(sock);
     shutdown(sock, 0);
     close(sock);
-    vTaskDelete(NULL);
 }
 
 /**
@@ -556,7 +718,7 @@ static void prover_task(void *pvParameters) {
     int listen_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
     if (listen_sock < 0) { ESP_LOGE(TAG, "Prover: Unable to create socket."); vTaskDelete(NULL); return; }
     if (bind(listen_sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr)) != 0) { ESP_LOGE(TAG, "Prover: Unable to bind socket."); close(listen_sock); vTaskDelete(NULL); return; }
-    if (listen(listen_sock, 5) != 0) { ESP_LOGE(TAG, "Prover: Error during listen."); close(listen_sock); vTaskDelete(NULL); return; }
+    if (listen(listen_sock, HATT_LISTEN_BACKLOG) != 0) { ESP_LOGE(TAG, "Prover: Error during listen."); close(listen_sock); vTaskDelete(NULL); return; }
     
     ESP_LOGI(TAG, "PROVER TASK STARTED: Listening on port %d", HATT_PORT);
 
@@ -570,20 +732,61 @@ static void prover_task(void *pvParameters) {
             continue;
         }
 
-        xTaskCreate(prover_session_task, "hatt_session", 4096, (void*)sock, 5, NULL);
+        // Sessions are served one at a time: the Verifiers that connect meanwhile wait in the listen queue,
+        // and the device never measures its memory for two Verifiers at once.
+        prover_session_task_body(sock);
     }
     close(listen_sock);
     vTaskDelete(NULL);
 }
 
 /**
- * @brief Starts the background task for the HAtt Prover.
+ * @brief Creates the locks of the attested memory; called before the first measurement.
+ */
+void hatt_init(void) {
+    // Keeps the test region in the image (it is otherwise unreferenced and would be discarded by the linker).
+    (void)*(volatile const uint8_t *)&sraft_attested_test_region[0];
+    if (!hatt_mem_mutex) hatt_mem_mutex = xSemaphoreCreateMutex();
+    if (!hatt_sigma_mutex) hatt_sigma_mutex = xSemaphoreCreateMutex();
+}
+
+/**
+ * @brief Starts the background task for the HAtt Prover (once).
  * @details This task listens for incoming attestation requests on the dedicated HAtt port
  * and handles the full 4-message protocol exchange for any connecting Verifier.
  * @return void
  */
 void hatt_prover_start_task(void) {
-    xTaskCreate(prover_task, "hatt_prover_task", 4096, NULL, 5, NULL);
+    static bool started = false;
+    hatt_init();
+    if (started) return;
+    if (xTaskCreate(prover_task, "hatt_prover_task", 4096, NULL, 5, NULL) == pdPASS) {
+        started = true;
+    } else {
+        ESP_LOGE(TAG, "Failed to create the HAtt Prover task.");
+    }
+}
+
+/**
+ * @brief SHA-256 digest of the attested memory, used by the tests to identify the image of a device.
+ */
+bool hatt_attested_image_digest(uint8_t digest[HATT_HASH_SIZE_BYTES]) {
+    const uint8_t *image = NULL;
+    size_t image_len = 0;
+    hatt_init();
+    if (!hatt_get_attested_memory(&image, &image_len)) return false;
+
+    // The image is read from flash through a small buffer in RAM.
+    psa_hash_operation_t op = PSA_HASH_OPERATION_INIT;
+    if (psa_hash_setup(&op, PSA_ALG_SHA_256) != PSA_SUCCESS) return false;
+    uint8_t chunk[256];
+    for (size_t off = 0; off < image_len; off += sizeof(chunk)) {
+        size_t n = image_len - off < sizeof(chunk) ? image_len - off : sizeof(chunk);
+        memcpy(chunk, image + off, n);
+        psa_hash_update(&op, chunk, n);
+    }
+    size_t hash_len = 0;
+    return psa_hash_finish(&op, digest, HATT_HASH_SIZE_BYTES, &hash_len) == PSA_SUCCESS;
 }
 
 /**
@@ -595,6 +798,15 @@ void hatt_prover_start_task(void) {
  * @return true if the attestation is successful and the Prover is deemed honest, false otherwise.
  */
 bool hatt_verifier_run_attestation(const char *prover_ip) {
+    return hatt_verifier_run_attestation_with_crp(prover_ip, NULL);
+}
+
+bool hatt_verifier_run_attestation_with_crp(const char *prover_ip, const CRPNode *enrolled_crp) {
+    return hatt_verifier_attest(prover_ip, enrolled_crp) == HATT_PASSED;
+}
+
+hatt_result_t hatt_verifier_attest(const char *prover_ip, const CRPNode *enrolled_crp) {
+    const int64_t attest_start_us = esp_timer_get_time();
     ESP_LOGI(TAG, "Verifier: Starting attestation for Prover at %s", prover_ip);
     Message1_t* msg1 = malloc(sizeof(Message1_t));
     Message2_t* msg2 = malloc(sizeof(Message2_t));
@@ -609,26 +821,37 @@ bool hatt_verifier_run_attestation(const char *prover_ip) {
         if (msg3) free(msg3);
         if (msg4) free(msg4);
         if (verifier_state) free(verifier_state);
-        return false;
+        return HATT_NO_ANSWER;
     }
 
-    CRPNode *stored_crp = db_get_random_crp_for_node(prover_ip);
+    CRPNode *stored_crp = NULL;
+    if (enrolled_crp) {
+        stored_crp = malloc(sizeof(CRPNode));
+        if (stored_crp) memcpy(stored_crp, enrolled_crp, sizeof(CRPNode));
+    } else {
+        stored_crp = db_get_random_crp_for_node(prover_ip);
+    }
     
     char my_ip[INET_ADDRSTRLEN];
     get_my_ip(my_ip, sizeof(my_ip));
     verifier_init(verifier_state, my_ip, prover_ip);
+    memset(verifier_state->challenge, 0, sizeof(verifier_state->challenge));
 
     if (stored_crp) {
         ESP_LOGI(TAG, "Verifier: Found stored CRP for %s. Using NORMAL mode.", prover_ip);
+        memset(verifier_state->puf_response_r, 0, sizeof(verifier_state->puf_response_r));
         strncpy((char*)verifier_state->puf_response_r, stored_crp->response, HATT_PUF_RESPONSE_SIZE_BYTES);
+        strncpy(verifier_state->challenge, stored_crp->challenge, HATT_MAX_CHALLENGE_LEN - 1);
         free(stored_crp);
     } else {
-        ESP_LOGW(TAG, "Verifier: No CRP found for %s. Using BOOTSTRAP/TEST mode (Shared Secret).", prover_ip);
-        memcpy(verifier_state->puf_response_r, SHARED_HATT_CHALLENGE, HATT_PUF_RESPONSE_SIZE_BYTES);
+        ESP_LOGW(TAG, "Verifier: No CRP found for %s. Using the network key.", prover_ip);
+        memset(verifier_state->puf_response_r, 0, sizeof(verifier_state->puf_response_r));
+        hatt_network_response(my_ip, prover_ip, verifier_state->puf_response_r);
     }
 
     int sock;
-    bool success = false;
+    hatt_result_t result = HATT_NO_ANSWER;
+    verifier_state->expected_sigma_ready = false;
     struct sockaddr_in dest_addr;
     dest_addr.sin_addr.s_addr = inet_addr(prover_ip);
     dest_addr.sin_family = AF_INET;
@@ -636,7 +859,14 @@ bool hatt_verifier_run_attestation(const char *prover_ip) {
 
     sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
     if (sock < 0) { ESP_LOGE(TAG, "Verifier: Unable to create socket."); goto CLEAN_UP; }
-    if (connect(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr)) != 0) { ESP_LOGE(TAG, "Verifier: Unable to connect."); close(sock); goto CLEAN_UP; }
+
+    // A Prover that accepts the connection and then stays silent must not block the Verifier. The Prover
+    // serves one Verifier at a time, so the first answer may also wait for the sessions queued before this one.
+    const uint32_t io_timeout_ms = hatt_measurement_timeout_ms();
+    struct timeval io_timeout = { .tv_sec = io_timeout_ms / 1000, .tv_usec = (io_timeout_ms % 1000) * 1000 };
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &io_timeout, sizeof(io_timeout));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &io_timeout, sizeof(io_timeout));
+    if (connect(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr)) != 0) { ESP_LOGE(TAG, "Verifier: Unable to connect."); close(sock); sock = -1; goto CLEAN_UP; }
     
     ESP_LOGI(TAG, "Verifier: Successfully connected to Prover.");
     
@@ -645,19 +875,31 @@ bool hatt_verifier_run_attestation(const char *prover_ip) {
     if (write(sock, msg1, sizeof(Message1_t)) < 0) { ESP_LOGE(TAG, "Verifier: write Message1 failed"); goto CLEAN_UP; }
     ESP_LOGD(TAG, "Verifier: Sent Message 1");
     
-    if (read(sock, msg2, sizeof(Message2_t)) <= 0) { ESP_LOGE(TAG, "Verifier: read Message2 failed"); goto CLEAN_UP; }
+    if (!hatt_read_full(sock, msg2, sizeof(Message2_t))) { ESP_LOGE(TAG, "Verifier: read Message2 failed"); goto CLEAN_UP; }
     
     if (!verifier_handle_message2(verifier_state, msg2, msg3)) { ESP_LOGE(TAG, "Verifier: Failed to process Message 2"); goto CLEAN_UP; }
     
     if (write(sock, msg3, sizeof(Message3_t)) < 0) { ESP_LOGE(TAG, "Verifier: write Message3 failed"); goto CLEAN_UP; }
     ESP_LOGD(TAG, "Verifier: Sent Message 3");
-    
-    if (read(sock, msg4, sizeof(Message4_t)) <= 0) { ESP_LOGE(TAG, "Verifier: read Message4 failed"); goto CLEAN_UP; }
 
-    success = verifier_handle_message4(verifier_state, msg4);
+    // The expected proof is computed on the reference image while the Prover measures its memory.
+    verifier_state->expected_sigma_ready = hatt_compute_sigma(verifier_state->expected_sigma, verifier_state->puf_response_r,
+                                                              verifier_state->s_beta, verifier_state->s_omega, &verifier_state->prng_state);
+
+    // The Prover may be serving other Verifiers, so the proof is awaited for a time that depends on the size of the network.
+    const uint32_t proof_timeout_ms = hatt_measurement_timeout_ms();
+    struct timeval proof_timeout = { .tv_sec = proof_timeout_ms / 1000, .tv_usec = (proof_timeout_ms % 1000) * 1000 };
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &proof_timeout, sizeof(proof_timeout));
+    if (!hatt_read_full(sock, msg4, sizeof(Message4_t))) { ESP_LOGE(TAG, "Verifier: read Message4 failed"); goto CLEAN_UP; }
+
+    result = verifier_handle_message4(verifier_state, msg4);
 
 CLEAN_UP:
-    ESP_LOGI(TAG, "Verifier: Connection closed. Attestation result: %s", success ? "PASSED" : "FAILED");
+    ESP_LOGI(TAG, "Verifier: Connection closed. Attestation result: %s",
+             result == HATT_PASSED ? "PASSED" : (result == HATT_FAILED ? "FAILED" : "NO ANSWER"));
+    ESP_LOGI(TAG, "HATT_STAT verifier prover=%s result=%s total_ms=%lld", prover_ip,
+             result == HATT_PASSED ? "PASSED" : (result == HATT_FAILED ? "FAILED" : "NO_ANSWER"),
+             (long long)((esp_timer_get_time() - attest_start_us) / 1000));
     if (sock >= 0) {
         close(sock);
     }
@@ -667,5 +909,5 @@ CLEAN_UP:
     if (msg3) free(msg3);
     if (msg4) free(msg4);
     if (verifier_state) free(verifier_state);
-    return success;
+    return result;
 }

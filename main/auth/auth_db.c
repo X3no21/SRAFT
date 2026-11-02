@@ -36,40 +36,167 @@ static portMUX_TYPE db_init_spinlock = portMUX_INITIALIZER_UNLOCKED;
     xSemaphoreGive(db_mutex); \
 } while(0)
 
+
+/* ---------------------------------------------------------------- compact network state
+ * The network state lists, for every Prover, the challenges assigned to each of its Verifiers. It is
+ * replicated on every device and grows with N * q, so it is kept in RAM in a compact form: a challenge is
+ * the index of a group of PUF cells of its Prover (challenges are "P<index>@<prover>"), and the two devices
+ * are indexes into a table of identifiers. Three bytes per entry instead of a 96-byte record, and lookups
+ * in RAM instead of one flash read per entry. The table is written to NVS as two blobs after each change.
+ * The content is the same as before: challenges and assignments, which are public, and no response. */
+#define CNODE_DEVICE_SLOTS 96
+#define CNODE_HOLDER_REVOKED 0xFF
+#define CNODE_GROW 64
+#define CNODE_TABLE_KEY "cnode_tab"
+#define CNODE_DEVICES_KEY "cnode_dev"
+
+typedef struct {
+    uint8_t index;   // group of cells of the Prover
+    uint8_t target;  // Prover, index into cnode_devices
+    uint8_t holder;  // Verifier, index into cnode_devices, or CNODE_HOLDER_REVOKED
+} packed_cnode_t;
+
+static char cnode_devices[CNODE_DEVICE_SLOTS][INET_ADDRSTRLEN];
+static packed_cnode_t *cnode_table = NULL;
+static int cnode_count = 0;
+static int cnode_capacity = 0;
+
+static int cnode_device_index(const char *ip, bool create) {
+    int free_slot = -1;
+    for (int i = 0; i < CNODE_DEVICE_SLOTS; i++) {
+        if (cnode_devices[i][0] == '\0') {
+            if (free_slot < 0) free_slot = i;
+        } else if (strcmp(cnode_devices[i], ip) == 0) {
+            return i;
+        }
+    }
+    if (!create) return -1;
+    if (free_slot < 0) {
+        // Identifiers no longer referenced by any entry are released, then the lookup is repeated once.
+        bool used[CNODE_DEVICE_SLOTS] = {0};
+        for (int k = 0; k < cnode_count; k++) {
+            used[cnode_table[k].target] = true;
+            if (cnode_table[k].holder != CNODE_HOLDER_REVOKED) used[cnode_table[k].holder] = true;
+        }
+        for (int i = 0; i < CNODE_DEVICE_SLOTS; i++) {
+            if (!used[i]) { cnode_devices[i][0] = '\0'; if (free_slot < 0) free_slot = i; }
+        }
+        if (free_slot < 0) return -1;
+    }
+    strncpy(cnode_devices[free_slot], ip, INET_ADDRSTRLEN - 1);
+    cnode_devices[free_slot][INET_ADDRSTRLEN - 1] = '\0';
+    return free_slot;
+}
+
+/** Parses "P<index>@<prover>", which must name the given Prover. */
+static bool cnode_parse_challenge(const char *challenge, const char *target_ip, uint8_t *index) {
+    const size_t prefix = strlen(PUF_CHALLENGE_PREFIX);
+    if (strncmp(challenge, PUF_CHALLENGE_PREFIX, prefix) != 0) return false;
+    char *end = NULL;
+    long value = strtol(challenge + prefix, &end, 10);
+    if (end == challenge + prefix || *end != '@' || value < 0 || value >= PUF_RESPONSE_CAPACITY) return false;
+    if (strcmp(end + 1, target_ip) != 0) return false;
+    *index = (uint8_t)value;
+    return true;
+}
+
+static void cnode_format(const packed_cnode_t *e, char *challenge, size_t challenge_size, char *target_ip, char *holder_ip) {
+    if (challenge) snprintf(challenge, challenge_size, "%s%u@%s", PUF_CHALLENGE_PREFIX, (unsigned)e->index, cnode_devices[e->target]);
+    if (target_ip) { strncpy(target_ip, cnode_devices[e->target], INET_ADDRSTRLEN - 1); target_ip[INET_ADDRSTRLEN - 1] = '\0'; }
+    if (holder_ip) {
+        const char *h = (e->holder == CNODE_HOLDER_REVOKED) ? DB_REVOKED_HOLDER : cnode_devices[e->holder];
+        strncpy(holder_ip, h, INET_ADDRSTRLEN - 1);
+        holder_ip[INET_ADDRSTRLEN - 1] = '\0';
+    }
+}
+
+static int cnode_find(uint8_t index, int target, int holder) {
+    for (int k = 0; k < cnode_count; k++) {
+        if (cnode_table[k].index == index && cnode_table[k].target == target && cnode_table[k].holder == holder) return k;
+    }
+    return -1;
+}
+
+/** Appends an entry to the table in RAM (the caller writes it to NVS). Duplicates are ignored. */
+static esp_err_t cnode_add_unsafe(const char *challenge, const char *target_ip, const char *holder_ip) {
+    uint8_t index;
+    if (!cnode_parse_challenge(challenge, target_ip, &index)) {
+        ESP_LOGE(TAG, "Malformed challenge %s for %s: entry not stored.", challenge, target_ip);
+        return ESP_ERR_INVALID_ARG;
+    }
+    int target = cnode_device_index(target_ip, true);
+    int holder = (strcmp(holder_ip, DB_REVOKED_HOLDER) == 0) ? CNODE_HOLDER_REVOKED : cnode_device_index(holder_ip, true);
+    if (target < 0 || holder < 0) {
+        ESP_LOGE(TAG, "Network state full: no identifier left for %s / %s.", target_ip, holder_ip);
+        return ESP_ERR_NO_MEM;
+    }
+    if (cnode_find(index, target, holder) >= 0) return ESP_OK;
+    if (cnode_count >= MAX_CNODE) {
+        ESP_LOGE(TAG, "Cannot insert CNode, network state is full (max %d).", MAX_CNODE);
+        return ESP_ERR_NO_MEM;
+    }
+    if (cnode_count == cnode_capacity) {
+        packed_cnode_t *grown = realloc(cnode_table, (cnode_capacity + CNODE_GROW) * sizeof(packed_cnode_t));
+        if (!grown) return ESP_ERR_NO_MEM;
+        cnode_table = grown;
+        cnode_capacity += CNODE_GROW;
+    }
+    cnode_table[cnode_count++] = (packed_cnode_t){ .index = index, .target = (uint8_t)target, .holder = (uint8_t)holder };
+    return ESP_OK;
+}
+
+static esp_err_t cnode_save_unsafe(nvs_handle_t handle) {
+    esp_err_t err = nvs_set_blob(handle, CNODE_DEVICES_KEY, cnode_devices, sizeof(cnode_devices));
+    if (err == ESP_OK) {
+        if (cnode_count > 0) err = nvs_set_blob(handle, CNODE_TABLE_KEY, cnode_table, cnode_count * sizeof(packed_cnode_t));
+        else { err = nvs_erase_key(handle, CNODE_TABLE_KEY); if (err == ESP_ERR_NVS_NOT_FOUND) err = ESP_OK; }
+    }
+    if (err == ESP_OK) err = nvs_commit(handle);
+    if (err != ESP_OK) ESP_LOGE(TAG, "Failed to store the network state: %s", esp_err_to_name(err));
+    return err;
+}
+
+/** Writes the table to NVS, opening the namespace. */
+static void cnode_persist_unsafe(void) {
+    nvs_handle_t handle;
+    if (nvs_open(DB_NAMESPACE, NVS_READWRITE, &handle) == ESP_OK) {
+        cnode_save_unsafe(handle);
+        nvs_close(handle);
+    }
+}
+
+static void cnode_load_unsafe(nvs_handle_t handle) {
+    memset(cnode_devices, 0, sizeof(cnode_devices));
+    free(cnode_table);
+    cnode_table = NULL;
+    cnode_count = cnode_capacity = 0;
+    size_t size = sizeof(cnode_devices);
+    if (nvs_get_blob(handle, CNODE_DEVICES_KEY, cnode_devices, &size) != ESP_OK) {
+        memset(cnode_devices, 0, sizeof(cnode_devices));
+        return;
+    }
+    size = 0;
+    if (nvs_get_blob(handle, CNODE_TABLE_KEY, NULL, &size) != ESP_OK || size == 0) return;
+    int entries = size / sizeof(packed_cnode_t);
+    cnode_capacity = ((entries + CNODE_GROW - 1) / CNODE_GROW) * CNODE_GROW;
+    cnode_table = malloc(cnode_capacity * sizeof(packed_cnode_t));
+    if (!cnode_table) { cnode_capacity = 0; return; }
+    if (nvs_get_blob(handle, CNODE_TABLE_KEY, cnode_table, &size) == ESP_OK) cnode_count = entries;
+}
+
+static void cnode_clear_unsafe(void) {
+    memset(cnode_devices, 0, sizeof(cnode_devices));
+    free(cnode_table);
+    cnode_table = NULL;
+    cnode_count = cnode_capacity = 0;
+}
+
 /**
- * @brief (Internal) Inserts a CNode entry without taking the mutex.
- * @details This is an internal helper function designed to be called by functions
- * that already hold the db_mutex, such as db_join_commit, to avoid deadlocks.
- * @param handle An open NVS handle with write permissions.
- * @param challenge The challenge string.
- * @param target_ip The target IP.
- * @param holder_ip The holder IP.
+ * @brief (Internal) Inserts a CNode entry without taking the mutex. The caller writes the table to NVS.
  */
 static esp_err_t __db_insert_cnode_unsafe(nvs_handle_t handle, const char *challenge, const char *target_ip, const char *holder_ip) {
-    int32_t cnode_count = 0;
-    nvs_get_i32(handle, "cnode_count", &cnode_count);
-
-    if (cnode_count >= MAX_CNODE) {
-        ESP_LOGE(TAG, "Cannot insert CNode, DB is full (max %d).", MAX_CNODE);
-        return ESP_ERR_NVS_NOT_ENOUGH_SPACE;
-    }
-
-    CNodeEntry new_cnode;
-    strncpy(new_cnode.challenge, challenge, sizeof(new_cnode.challenge) - 1);
-    new_cnode.challenge[sizeof(new_cnode.challenge) - 1] = '\0';
-    strncpy(new_cnode.target_ip, target_ip, sizeof(new_cnode.target_ip) - 1);
-    new_cnode.target_ip[sizeof(new_cnode.target_ip) - 1] = '\0';
-    strncpy(new_cnode.holder_ip, holder_ip, sizeof(new_cnode.holder_ip) - 1);
-    new_cnode.holder_ip[sizeof(new_cnode.holder_ip) - 1] = '\0';
-
-    char key[20];
-    snprintf(key, sizeof(key), "cnode_%" PRId32, cnode_count);
-    esp_err_t err = nvs_set_blob(handle, key, &new_cnode, sizeof(CNodeEntry));
-    if (err != ESP_OK) {
-        return err;
-    }
-
-    return ESP_OK;
+    (void)handle;
+    return cnode_add_unsafe(challenge, target_ip, holder_ip);
 }
 
 /**
@@ -80,6 +207,11 @@ static esp_err_t __db_insert_cnode_unsafe(nvs_handle_t handle, const char *chall
  * @param crp A pointer to the CRPNode to insert.
  */
 static esp_err_t __db_insert_crp_unsafe(nvs_handle_t handle, const CRPNode *crp) {
+    // A staged CRP whose response never arrived is not a credential.
+    if (strcmp(crp->response, DB_PENDING_RESPONSE) == 0) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
     int32_t crp_count = 0;
     nvs_get_i32(handle, "crp_count", &crp_count);
 
@@ -94,8 +226,8 @@ static esp_err_t __db_insert_crp_unsafe(nvs_handle_t handle, const CRPNode *crp)
     if (err != ESP_OK) {
         return err;
     }
-
-    return ESP_OK;
+    // The count is updated at every insertion, so that consecutive insertions do not reuse the same key.
+    return nvs_set_i32(handle, "crp_count", crp_count + 1);
 }
 
 /**
@@ -167,8 +299,9 @@ void db_init(void) {
         ESP_LOGE(TAG, "Error (%s) opening NVS handle!", esp_err_to_name(err));
         goto cleanup;
     }
+    cnode_load_unsafe(my_handle);
 
-    ESP_LOGI(TAG, "DB initialized successfully.");
+    ESP_LOGI(TAG, "DB initialized successfully (%d network-state entries).", cnode_count);
 
 cleanup:
     if (my_handle != 0) {
@@ -403,73 +536,36 @@ bool db_get_random_follower_ip(char *ip_buffer, size_t buffer_size) {
 }
 
 /**
- * @brief Finds a random verifier (holder) for the current node from the CNode table.
- * @details This function uses an efficient reservoir sampling algorithm to find a random
- * verifier for the given node IP with minimal memory overhead.
- * @param my_ip The IP address of the current node seeking a verifier.
- * @return A dynamically allocated string containing the verifier's IP. The caller must free this string. Returns NULL if no verifier is found.
+ * @brief Picks at random one of the Verifiers of this device (revoked challenges are skipped).
+ * @return A newly allocated string, or NULL if there is none.
  */
 char *db_get_random_verifier_for_me(const char *my_ip) {
-    char *selected_verifier_ip = NULL;
-    char candidate_ip_buffer[INET_ADDRSTRLEN];
-    int match_count = 0;
-
+    char *selected = NULL;
     TAKE_DB_MUTEX(__FUNCTION__);
-    nvs_handle_t my_handle;
-    if (nvs_open(DB_NAMESPACE, NVS_READONLY, &my_handle) == ESP_OK) {
-        int32_t cnode_count = 0;
-        nvs_get_i32(my_handle, "cnode_count", &cnode_count);
-        for (int i = 0; i < cnode_count; i++) {
-            char key[20];
-            snprintf(key, sizeof(key), "cnode_%d", i);
-            CNodeEntry candidate;
-            size_t required_size = sizeof(CNodeEntry);
-            if (nvs_get_blob(my_handle, key, &candidate, &required_size) == ESP_OK) {
-                if (strcmp(candidate.target_ip, my_ip) == 0) {
-                    match_count++;
-                    if ((esp_random() % match_count) == 0) {
-                        strncpy(candidate_ip_buffer, candidate.holder_ip, INET_ADDRSTRLEN - 1);
-                        candidate_ip_buffer[INET_ADDRSTRLEN - 1] = '\0';
-                    }
-                }
-            }
+    int me = cnode_device_index(my_ip, false);
+    int matches = 0, chosen = -1;
+    for (int k = 0; me >= 0 && k < cnode_count; k++) {
+        if (cnode_table[k].target == me && cnode_table[k].holder != CNODE_HOLDER_REVOKED && cnode_table[k].holder != me) {
+            matches++;
+            if ((esp_random() % matches) == 0) chosen = cnode_table[k].holder;
         }
-        if (match_count > 0) {
-            selected_verifier_ip = strdup(candidate_ip_buffer);
-        }
-        nvs_close(my_handle);
     }
+    if (chosen >= 0) selected = strdup(cnode_devices[chosen]);
     GIVE_DB_MUTEX(__FUNCTION__);
-    return selected_verifier_ip;
+    return selected;
 }
 
 /**
  * @brief Checks if a specific CNode entry exists.
- * @param challenge The challenge string of the CNode.
- * @param target_ip The target IP address of the CNode.
- * @param holder_ip The holder IP address of the CNode.
- * @return true if the entry exists, false otherwise.
  */
 bool db_cnode_exists(const char *challenge, const char *target_ip, const char *holder_ip) {
     bool exists = false;
+    uint8_t index;
     TAKE_DB_MUTEX(__FUNCTION__);
-    nvs_handle_t my_handle;
-    if (nvs_open(DB_NAMESPACE, NVS_READONLY, &my_handle) == ESP_OK) {
-        int32_t cnode_count = 0;
-        nvs_get_i32(my_handle, "cnode_count", &cnode_count);
-        for (int i = 0; i < cnode_count; i++) {
-            char key[20];
-            snprintf(key, sizeof(key), "cnode_%d", i);
-            CNodeEntry cnode;
-            size_t required_size = sizeof(CNodeEntry);
-            if (nvs_get_blob(my_handle, key, &cnode, &required_size) == ESP_OK) {
-                if (strcmp(cnode.challenge, challenge) == 0 && strcmp(cnode.target_ip, target_ip) == 0 && strcmp(cnode.holder_ip, holder_ip) == 0) {
-                    exists = true;
-                    break;
-                }
-            }
-        }
-        nvs_close(my_handle);
+    if (cnode_parse_challenge(challenge, target_ip, &index)) {
+        int target = cnode_device_index(target_ip, false);
+        int holder = (strcmp(holder_ip, DB_REVOKED_HOLDER) == 0) ? CNODE_HOLDER_REVOKED : cnode_device_index(holder_ip, false);
+        exists = target >= 0 && holder >= 0 && cnode_find(index, target, holder) >= 0;
     }
     GIVE_DB_MUTEX(__FUNCTION__);
     return exists;
@@ -477,42 +573,11 @@ bool db_cnode_exists(const char *challenge, const char *target_ip, const char *h
 
 /**
  * @brief Inserts a new CNode entry into the database if it does not already exist.
- * @details This function is optimized to perform existence check and insertion in a single pass.
- * @param challenge The challenge string for the new entry.
- * @param target_ip The target IP address for the new entry.
- * @param holder_ip The holder IP address for the new entry.
  */
 void db_insert_cnode(const char *challenge, const char *target_ip, const char *holder_ip) {
     TAKE_DB_MUTEX(__FUNCTION__);
-    nvs_handle_t my_handle;
-    if (nvs_open(DB_NAMESPACE, NVS_READWRITE, &my_handle) == ESP_OK) {
-        int32_t cnode_count = 0;
-        nvs_get_i32(my_handle, "cnode_count", &cnode_count);
-
-        bool exists = false;
-        for (int i = 0; i < cnode_count; i++) {
-            char key[20];
-            snprintf(key, sizeof(key), "cnode_%d", i);
-            CNodeEntry cnode;
-            size_t required_size = sizeof(CNodeEntry);
-            if (nvs_get_blob(my_handle, key, &cnode, &required_size) == ESP_OK) {
-                if (strcmp(cnode.challenge, challenge) == 0 && strcmp(cnode.target_ip, target_ip) == 0 && strcmp(cnode.holder_ip, holder_ip) == 0) {
-                    exists = true;
-                    break;
-                }
-            }
-        }
-
-        if (!exists) {
-            if (__db_insert_cnode_unsafe(my_handle, challenge, target_ip, holder_ip) == ESP_OK) {
-                esp_err_t err_count = nvs_set_i32(my_handle, "cnode_count", cnode_count + 1);
-                if (err_count == ESP_OK && nvs_commit(my_handle) != ESP_OK) {
-                    ESP_LOGE(TAG, "Failed to commit NVS for cnode insert!");
-                }
-            }
-        }
-        nvs_close(my_handle);
-    }
+    int before = cnode_count;
+    if (cnode_add_unsafe(challenge, target_ip, holder_ip) == ESP_OK && cnode_count != before) cnode_persist_unsafe();
     GIVE_DB_MUTEX(__FUNCTION__);
 }
 
@@ -564,6 +629,65 @@ CRPNode *db_get_random_crp_for_node(const char *target_ip) {
     }
 
     return selected_crp;
+}
+
+void db_log_storage(void) {
+#if CONFIG_LOG_MAXIMUM_LEVEL < 3
+    // Release profile: no diagnostics.
+    return;
+#endif
+    if (db_mutex == NULL) return;
+    nvs_stats_t stats;
+    if (nvs_get_stats(NULL, &stats) != ESP_OK) return;
+    int32_t crps = 0, cnodes = 0, nodes = 0;
+    size_t db_entries = 0;
+    TAKE_DB_MUTEX(__FUNCTION__);
+    nvs_handle_t handle;
+    if (nvs_open(DB_NAMESPACE, NVS_READONLY, &handle) == ESP_OK) {
+        nvs_get_i32(handle, "crp_count", &crps);
+        cnodes = cnode_count;
+        nvs_get_i32(handle, "node_count", &nodes);
+        nvs_get_used_entry_count(handle, &db_entries);
+        nvs_close(handle);
+    }
+    GIVE_DB_MUTEX(__FUNCTION__);
+    ESP_LOGI("STORAGE", "nvs used %u of %u entries, network state and shards %u entries (%u bytes), members %ld, crps %ld, cnodes %ld",
+             (unsigned)stats.used_entries, (unsigned)stats.total_entries, (unsigned)db_entries, (unsigned)(db_entries * 32),
+             (long)nodes, (long)crps, (long)cnodes);
+}
+
+int db_get_crps_for_node(const char *target_ip, CRPNode *out, int max) {
+    int found = 0;
+    if (!out || max <= 0) return 0;
+    TAKE_DB_MUTEX(__FUNCTION__);
+    nvs_handle_t my_handle;
+    if (nvs_open(DB_NAMESPACE, NVS_READONLY, &my_handle) == ESP_OK) {
+        int32_t crp_count = 0;
+        nvs_get_i32(my_handle, "crp_count", &crp_count);
+        for (int i = 0; i < crp_count && found < max; i++) {
+            char key[20];
+            snprintf(key, sizeof(key), "crp_%d", i);
+            size_t required_size = sizeof(CRPNode);
+            CRPNode temp_crp;
+            if (nvs_get_blob(my_handle, key, &temp_crp, &required_size) == ESP_OK && strcmp(temp_crp.target_ip, target_ip) == 0) {
+                memcpy(&out[found++], &temp_crp, sizeof(CRPNode));
+            }
+        }
+        nvs_close(my_handle);
+    }
+    GIVE_DB_MUTEX(__FUNCTION__);
+
+    // The checks start from a random CRP, so that all of them are used over time.
+    if (found > 1) {
+        int shift = esp_random() % found;
+        for (int s = 0; s < shift; s++) {
+            CRPNode first;
+            memcpy(&first, &out[0], sizeof(CRPNode));
+            memmove(&out[0], &out[1], (found - 1) * sizeof(CRPNode));
+            memcpy(&out[found - 1], &first, sizeof(CRPNode));
+        }
+    }
+    return found;
 }
 
 /**
@@ -662,32 +786,21 @@ char *db_export_nodes_json(void) {
 }
 
 /**
- * @brief Exports the CNode table as a JSON string.
- * @return A dynamically allocated string containing the JSON representation of the CNode table. The caller must free this string. Returns NULL on failure.
+ * @brief Exports the CNode table as a JSON array of {c, t, h}.
  */
 char *db_export_cnode_json(void) {
     char *json_string = NULL;
     TAKE_DB_MUTEX(__FUNCTION__);
     cJSON *root = cJSON_CreateArray();
     if (root) {
-        nvs_handle_t my_handle;
-        if (nvs_open(DB_NAMESPACE, NVS_READONLY, &my_handle) == ESP_OK) {
-            int32_t cnode_count = 0;
-            nvs_get_i32(my_handle, "cnode_count", &cnode_count);
-            for (int i = 0; i < cnode_count; i++) {
-                char key[20];
-                snprintf(key, sizeof(key), "cnode_%d", i);
-                CNodeEntry cnode;
-                size_t required_size = sizeof(CNodeEntry);
-                if (nvs_get_blob(my_handle, key, &cnode, &required_size) == ESP_OK) {
-                    cJSON *cnode_json = cJSON_CreateObject();
-                    cJSON_AddStringToObject(cnode_json, "c", cnode.challenge);
-                    cJSON_AddStringToObject(cnode_json, "t", cnode.target_ip);
-                    cJSON_AddStringToObject(cnode_json, "h", cnode.holder_ip);
-                    cJSON_AddItemToArray(root, cnode_json);
-                }
-            }
-            nvs_close(my_handle);
+        for (int k = 0; k < cnode_count; k++) {
+            char challenge[64], target[INET_ADDRSTRLEN], holder[INET_ADDRSTRLEN];
+            cnode_format(&cnode_table[k], challenge, sizeof(challenge), target, holder);
+            cJSON *item = cJSON_CreateObject();
+            cJSON_AddStringToObject(item, "c", challenge);
+            cJSON_AddStringToObject(item, "t", target);
+            cJSON_AddStringToObject(item, "h", holder);
+            cJSON_AddItemToArray(root, item);
         }
         json_string = cJSON_PrintUnformatted(root);
         cJSON_Delete(root);
@@ -719,27 +832,136 @@ void db_import_nodes_json(const char *json_string) {
 }
 
 /**
- * @brief Imports CNode entries from a JSON string, appending them to the existing table.
- * @param json A null-terminated C-string containing the JSON array of CNodes.
+ * @brief Imports CNode entries from a JSON array of {c, t, h}, adding them to the existing table.
  */
 void db_import_cnode_json(const char *json) {
     cJSON *root = cJSON_Parse(json);
     if (!root || !cJSON_IsArray(root)) {
-        if (root)
-            cJSON_Delete(root);
+        if (root) cJSON_Delete(root);
         return;
     }
-
-    cJSON *cnode_json;
-    cJSON_ArrayForEach(cnode_json, root) {
-        cJSON *c = cJSON_GetObjectItem(cnode_json, "c");
-        cJSON *t = cJSON_GetObjectItem(cnode_json, "t");
-        cJSON *h = cJSON_GetObjectItem(cnode_json, "h");
+    TAKE_DB_MUTEX(__FUNCTION__);
+    int before = cnode_count;
+    cJSON *item;
+    cJSON_ArrayForEach(item, root) {
+        cJSON *c = cJSON_GetObjectItem(item, "c");
+        cJSON *t = cJSON_GetObjectItem(item, "t");
+        cJSON *h = cJSON_GetObjectItem(item, "h");
         if (cJSON_IsString(c) && cJSON_IsString(t) && cJSON_IsString(h)) {
-            db_insert_cnode(c->valuestring, t->valuestring, h->valuestring);
+            cnode_add_unsafe(c->valuestring, t->valuestring, h->valuestring);
         }
     }
+    if (cnode_count != before) cnode_persist_unsafe();
+    GIVE_DB_MUTEX(__FUNCTION__);
     cJSON_Delete(root);
+}
+
+/**
+ * @brief Exports the whole network state for a joining device in a compact text form.
+ * @details Format: "<id0>,<id1>,...#<index>.<prover>.<verifier>;..." where prover and verifier are positions
+ * in the list of identifiers and a revoked Verifier is "r". The entries of delta_json (a JSON array of
+ * {c, t, h}, e.g., those of the join in progress) are appended. The caller frees the string.
+ */
+char *db_export_state_compact(const char *delta_json) {
+    TAKE_DB_MUTEX(__FUNCTION__);
+    cJSON *delta = delta_json ? cJSON_Parse(delta_json) : NULL;
+    int extra = (delta && cJSON_IsArray(delta)) ? cJSON_GetArraySize(delta) : 0;
+    // Identifiers used by the exported entries, in the order of first use.
+    char (*ids)[INET_ADDRSTRLEN] = calloc(CNODE_DEVICE_SLOTS + 2 * extra + 1, INET_ADDRSTRLEN);
+    size_t cap = (size_t)(cnode_count + extra) * 12 + (CNODE_DEVICE_SLOTS + 2 * extra) * (INET_ADDRSTRLEN + 1) + 2;
+    char *entries = malloc((size_t)(cnode_count + extra) * 12 + 2);
+    char *out = malloc(cap);
+    int id_count = 0;
+    if (!ids || !entries || !out) goto fail;
+    size_t elen = 0;
+    entries[0] = '\0';
+    for (int k = 0; k < cnode_count + extra; k++) {
+        char challenge[64], target[INET_ADDRSTRLEN], holder[INET_ADDRSTRLEN];
+        uint8_t index;
+        if (k < cnode_count) {
+            cnode_format(&cnode_table[k], challenge, sizeof(challenge), target, holder);
+        } else {
+            cJSON *item = cJSON_GetArrayItem(delta, k - cnode_count);
+            cJSON *c = cJSON_GetObjectItem(item, "c"), *t = cJSON_GetObjectItem(item, "t"), *h = cJSON_GetObjectItem(item, "h");
+            if (!cJSON_IsString(c) || !cJSON_IsString(t) || !cJSON_IsString(h)) continue;
+            snprintf(challenge, sizeof(challenge), "%s", c->valuestring);
+            snprintf(target, sizeof(target), "%s", t->valuestring);
+            snprintf(holder, sizeof(holder), "%s", h->valuestring);
+        }
+        if (!cnode_parse_challenge(challenge, target, &index)) continue;
+        int ti = -1, hi = -1;
+        bool revoked = strcmp(holder, DB_REVOKED_HOLDER) == 0;
+        for (int i = 0; i < id_count; i++) {
+            if (strcmp(ids[i], target) == 0) ti = i;
+            if (!revoked && strcmp(ids[i], holder) == 0) hi = i;
+        }
+        if (ti < 0) { ti = id_count; strcpy(ids[id_count++], target); }
+        if (!revoked && hi < 0) { hi = id_count; strcpy(ids[id_count++], holder); }
+        if (revoked) elen += sprintf(entries + elen, "%s%u.%d.r", elen ? ";" : "", (unsigned)index, ti);
+        else elen += sprintf(entries + elen, "%s%u.%d.%d", elen ? ";" : "", (unsigned)index, ti, hi);
+    }
+    size_t olen = 0;
+    for (int i = 0; i < id_count; i++) olen += sprintf(out + olen, "%s%s", i ? "," : "", ids[i]);
+    olen += sprintf(out + olen, "#%s", entries);
+    free(ids);
+    free(entries);
+    if (delta) cJSON_Delete(delta);
+    GIVE_DB_MUTEX(__FUNCTION__);
+    return out;
+fail:
+    free(ids);
+    free(entries);
+    free(out);
+    if (delta) cJSON_Delete(delta);
+    GIVE_DB_MUTEX(__FUNCTION__);
+    return NULL;
+}
+
+/**
+ * @brief Replaces the network state with the one exported by db_export_state_compact.
+ * @return true if the text was well formed.
+ */
+bool db_import_state_compact(const char *state) {
+    const char *hash = strchr(state, '#');
+    if (!hash) return false;
+    char (*ids)[INET_ADDRSTRLEN] = calloc(CNODE_DEVICE_SLOTS + 1, INET_ADDRSTRLEN);
+    if (!ids) return false;
+    int id_count = 0;
+    const char *p = state;
+    while (p < hash && id_count < CNODE_DEVICE_SLOTS) {
+        const char *comma = memchr(p, ',', hash - p);
+        const char *end = comma ? comma : hash;
+        size_t n = end - p;
+        if (n == 0 || n >= INET_ADDRSTRLEN) { free(ids); return false; }
+        memcpy(ids[id_count], p, n);
+        ids[id_count++][n] = '\0';
+        p = comma ? comma + 1 : hash;
+    }
+    TAKE_DB_MUTEX(__FUNCTION__);
+    cnode_clear_unsafe();
+    bool ok = true;
+    p = hash + 1;
+    while (*p) {
+        unsigned index = 0;
+        int ti = -1, hi = -1, used = 0;
+        char holder_tag = 0;
+        if (sscanf(p, "%u.%d.%n", &index, &ti, &used) < 2 || used == 0) { ok = false; break; }
+        p += used;
+        if (*p == 'r') { holder_tag = 'r'; p++; }
+        else { char *end; hi = (int)strtol(p, &end, 10); if (end == p) { ok = false; break; } p = end; }
+        if (ti < 0 || ti >= id_count || (holder_tag != 'r' && (hi < 0 || hi >= id_count))) { ok = false; break; }
+        char challenge[64];
+        snprintf(challenge, sizeof(challenge), "%s%u@%s", PUF_CHALLENGE_PREFIX, index, ids[ti]);
+        cnode_add_unsafe(challenge, ids[ti], holder_tag == 'r' ? DB_REVOKED_HOLDER : ids[hi]);
+        if (*p == ';') p++;
+        else if (*p) { ok = false; break; }
+    }
+    cnode_persist_unsafe();
+    GIVE_DB_MUTEX(__FUNCTION__);
+    free(ids);
+    if (!ok) ESP_LOGE(TAG, "Malformed network state received.");
+    else ESP_LOGI(TAG, "Network state imported: %d entries.", cnode_count);
+    return ok;
 }
 
 /**
@@ -888,67 +1110,49 @@ void db_remove_crp_for_node(const char *target_ip) {
 }
 
 /**
- * @brief Removes all CNode entries where the given node is either the target or the holder.
- * @param node_ip The IP address of the node to remove from the CNode table.
+ * @brief Removes the entries whose Prover is the given device, and revokes those it held as a Verifier.
  */
 void db_remove_cnode_for_node(const char *node_ip) {
     TAKE_DB_MUTEX(__FUNCTION__);
-    nvs_handle_t my_handle;
-    if (nvs_open(DB_NAMESPACE, NVS_READWRITE, &my_handle) == ESP_OK) {
-        int32_t cnode_count = 0;
-        nvs_get_i32(my_handle, "cnode_count", &cnode_count);
-        int i = 0;
-        int initial_count = cnode_count;
-        while (i < cnode_count) {
-            char key[20];
-            snprintf(key, sizeof(key), "cnode_%d", i);
-            CNodeEntry cnode;
-            size_t size = sizeof(CNodeEntry);
-
-            if (nvs_get_blob(my_handle, key, &cnode, &size) == ESP_OK &&
-                (strcmp(cnode.target_ip, node_ip) == 0 || strcmp(cnode.holder_ip, node_ip) == 0)) {
-
-                bool swap_ok = true;
-                if (i < cnode_count - 1) {
-                    CNodeEntry last_cnode;
-                    char last_key[20];
-                    snprintf(last_key, sizeof(last_key), "cnode_%" PRId32, cnode_count - 1);
-
-                    if (nvs_get_blob(my_handle, last_key, &last_cnode, &size) == ESP_OK) {
-                        if (nvs_set_blob(my_handle, key, &last_cnode, sizeof(CNodeEntry)) != ESP_OK) {
-                            swap_ok = false;
-                            ESP_LOGE(TAG, "Failed to write swapped cnode at index %d", i);
-                        }
-                    } else {
-                        swap_ok = false;
-                        ESP_LOGE(TAG, "Failed to read last cnode for swap at index %d", i);
-                    }
-                }
-
-                if (swap_ok) {
-                    char key_to_erase[20];
-                    snprintf(key_to_erase, sizeof(key_to_erase), "cnode_%" PRId32, cnode_count - 1);
-                    nvs_erase_key(my_handle, key_to_erase);
-                    cnode_count--;
-                } else {
-                    i++;
-                }
-            } else {
-                i++;
-            }
+    int dev = cnode_device_index(node_ip, false);
+    int removed = 0, revoked = 0;
+    if (dev >= 0) {
+        int w = 0;
+        for (int k = 0; k < cnode_count; k++) {
+            packed_cnode_t e = cnode_table[k];
+            if (e.target == dev) { removed++; continue; }
+            // The removed device was the Verifier: the challenge is revoked, not forgotten.
+            if (e.holder == dev) { e.holder = CNODE_HOLDER_REVOKED; revoked++; }
+            cnode_table[w++] = e;
         }
-
-        if (initial_count != cnode_count) {
-            nvs_set_i32(my_handle, "cnode_count", cnode_count);
-            if (nvs_commit(my_handle) != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to commit NVS for cnode remove!");
-            }
-            ESP_LOGI(TAG, "Removed %d CNodes for node %s.", initial_count - cnode_count, node_ip);
-        }
-
-        nvs_close(my_handle);
+        cnode_count = w;
+        if (removed || revoked) cnode_persist_unsafe();
     }
     GIVE_DB_MUTEX(__FUNCTION__);
+    if (removed || revoked) ESP_LOGI(TAG, "Removed %d CNodes and revoked %d for node %s.", removed, revoked, node_ip);
+}
+
+/**
+ * @brief Moves to new_holder the entries in which self_ip is both the Prover and the Verifier (the
+ * credentials of the first Coordinator, created before any other device exists) and returns their
+ * challenges, so that the corresponding CRPs can be handed over.
+ */
+int db_reassign_self_cnodes(const char *self_ip, const char *new_holder, char challenges[][64], int max) {
+    int moved = 0;
+    TAKE_DB_MUTEX(__FUNCTION__);
+    int self = cnode_device_index(self_ip, false);
+    int holder = cnode_device_index(new_holder, true);
+    if (self >= 0 && holder >= 0) {
+        for (int k = 0; k < cnode_count && moved < max; k++) {
+            if (cnode_table[k].target != self || cnode_table[k].holder != self) continue;
+            cnode_format(&cnode_table[k], challenges[moved], 64, NULL, NULL);
+            cnode_table[k].holder = (uint8_t)holder;
+            moved++;
+        }
+        if (moved) cnode_persist_unsafe();
+    }
+    GIVE_DB_MUTEX(__FUNCTION__);
+    return moved;
 }
 
 /**
@@ -957,27 +1161,8 @@ void db_remove_cnode_for_node(const char *node_ip) {
  * @return The number of verifiers found for the target node.
  */
 int db_get_verifier_count_for_node(const char *target_ip) {
-    int count = 0;
-    TAKE_DB_MUTEX(__FUNCTION__);
-    nvs_handle_t my_handle;
-    if (nvs_open(DB_NAMESPACE, NVS_READONLY, &my_handle) == ESP_OK) {
-        int32_t cnode_count = 0;
-        nvs_get_i32(my_handle, "cnode_count", &cnode_count);
-        for (int i = 0; i < cnode_count; i++) {
-            char key[20];
-            snprintf(key, sizeof(key), "cnode_%d", i);
-            CNodeEntry cnode;
-            size_t required_size = sizeof(CNodeEntry);
-            if (nvs_get_blob(my_handle, key, &cnode, &required_size) == ESP_OK) {
-                if (strcmp(cnode.target_ip, target_ip) == 0) {
-                    count++;
-                }
-            }
-        }
-        nvs_close(my_handle);
-    }
-    GIVE_DB_MUTEX(__FUNCTION__);
-    return count;
+    char verifier_ips[MAX_DISTINCT_VERIFIERS][INET_ADDRSTRLEN];
+    return db_get_verifiers_for_node(target_ip, verifier_ips, MAX_DISTINCT_VERIFIERS);
 }
 
 /**
@@ -997,7 +1182,8 @@ void db_join_tmp_clear(void) {
 void db_join_tmp_insert_crp(uint32_t transaction_id, const CRPNode *crp) {
     TAKE_DB_MUTEX(__FUNCTION__);
     nvs_handle_t tmp_handle;
-    if (nvs_open(DB_TMP_NAMESPACE, NVS_READWRITE, &tmp_handle) == ESP_OK) {
+    esp_err_t err = nvs_open(DB_TMP_NAMESPACE, NVS_READWRITE, &tmp_handle);
+    if (err == ESP_OK) {
         int32_t count = 0;
         nvs_get_i32(tmp_handle, "tmp_crp_count", &count);
 
@@ -1007,14 +1193,18 @@ void db_join_tmp_insert_crp(uint32_t transaction_id, const CRPNode *crp) {
 
         char key[20];
         snprintf(key, sizeof(key), "crp_%ld", count);
-        if (nvs_set_blob(tmp_handle, key, &tmp_entry, sizeof(TmpCRPNode)) == ESP_OK) {
+        err = nvs_set_blob(tmp_handle, key, &tmp_entry, sizeof(TmpCRPNode));
+        if (err == ESP_OK) {
             count++;
-            nvs_set_i32(tmp_handle, "tmp_crp_count", count);
-            if (nvs_commit(tmp_handle) != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to commit NVS for tmp_crp insert!");
-            }
+            err = nvs_set_i32(tmp_handle, "tmp_crp_count", count);
+        }
+        if (err == ESP_OK) {
+            err = nvs_commit(tmp_handle);
         }
         nvs_close(tmp_handle);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to stage CRP %s (TID: %lu): %s", crp->challenge, transaction_id, esp_err_to_name(err));
     }
     GIVE_DB_MUTEX(__FUNCTION__);
 }
@@ -1131,34 +1321,23 @@ CRPNode *db_join_tmp_get_crp_by_challenge(uint32_t transaction_id, const char *c
 }
 
 /**
- * @brief Retrieves a list of all current verifiers (holders) for a given target node.
- * @param target_ip The IP address of the node whose verifiers are to be found.
- * @param verifier_ips A 2D char array to store the resulting IP addresses of the verifiers.
- * @param max_verifiers The maximum number of IPs the verifier_ips array can hold.
- * @return The number of verifiers found and copied into the array.
+ * @brief Lists the distinct Verifiers of a Prover (revoked challenges are skipped).
  */
 int db_get_verifiers_for_node(const char* target_ip, char verifier_ips[][INET_ADDRSTRLEN], int max_verifiers) {
     int count = 0;
     TAKE_DB_MUTEX(__FUNCTION__);
-    nvs_handle_t my_handle;
-    if (nvs_open(DB_NAMESPACE, NVS_READONLY, &my_handle) == ESP_OK) {
-        int32_t cnode_count = 0;
-        nvs_get_i32(my_handle, "cnode_count", &cnode_count);
-
-        for (int i = 0; i < cnode_count && count < max_verifiers; i++) {
-            char key[20];
-            snprintf(key, sizeof(key), "cnode_%d", i);
-            CNodeEntry cnode;
-            size_t required_size = sizeof(CNodeEntry);
-            if (nvs_get_blob(my_handle, key, &cnode, &required_size) == ESP_OK) {
-                if (strcmp(cnode.target_ip, target_ip) == 0) {
-                    strncpy(verifier_ips[count], cnode.holder_ip, INET_ADDRSTRLEN - 1);
-                    verifier_ips[count][INET_ADDRSTRLEN - 1] = '\0';
-                    count++;
-                }
-            }
+    int target = cnode_device_index(target_ip, false);
+    for (int k = 0; target >= 0 && k < cnode_count && count < max_verifiers; k++) {
+        // The entries that the first Coordinator holds for itself, created at genesis, are not a Verifier.
+        if (cnode_table[k].target != target || cnode_table[k].holder == CNODE_HOLDER_REVOKED || cnode_table[k].holder == target) continue;
+        const char *holder = cnode_devices[cnode_table[k].holder];
+        bool listed = false;
+        for (int j = 0; j < count && !listed; j++) listed = strcmp(verifier_ips[j], holder) == 0;
+        if (!listed) {
+            strncpy(verifier_ips[count], holder, INET_ADDRSTRLEN - 1);
+            verifier_ips[count][INET_ADDRSTRLEN - 1] = '\0';
+            count++;
         }
-        nvs_close(my_handle);
     }
     GIVE_DB_MUTEX(__FUNCTION__);
     return count;
@@ -1415,8 +1594,7 @@ void db_join_commit(uint32_t transaction_id) {
         return;
     }
 
-    int32_t main_cnode_count = 0, main_crp_count = 0;
-    nvs_get_i32(main_handle, "cnode_count", &main_cnode_count);
+    int32_t main_cnode_count = cnode_count, main_crp_count = 0;
     nvs_get_i32(main_handle, "crp_count", &main_crp_count);
 
     int32_t tmp_cnode_count = 0;
@@ -1434,7 +1612,7 @@ void db_join_commit(uint32_t transaction_id) {
             }
         }
     }
-    nvs_set_i32(main_handle, "cnode_count", main_cnode_count);
+    if (main_cnode_count != cnode_count || cnode_count > 0) cnode_save_unsafe(main_handle);
     int32_t tmp_crp_count = 0;
     nvs_get_i32(tmp_handle, "tmp_crp_count", &tmp_crp_count);
     for (int i = 0; i < tmp_crp_count; i++) {
@@ -1476,6 +1654,7 @@ void db_wipe_all_auth_data(void) {
     if (err == ESP_OK) {
         ESP_LOGW(TAG, "Wiping all data from '%s' namespace.", DB_NAMESPACE);
         nvs_erase_all(my_handle);
+        cnode_clear_unsafe();
         nvs_commit(my_handle);
         nvs_close(my_handle);
     } else {
@@ -1557,8 +1736,7 @@ void db_join_commit_all_pending_heal(void) {
         return;
     }
 
-    int32_t main_cnode_count = 0, main_crp_count = 0;
-    nvs_get_i32(main_handle, "cnode_count", &main_cnode_count);
+    int32_t main_cnode_count = cnode_count, main_crp_count = 0;
     nvs_get_i32(main_handle, "crp_count", &main_crp_count);
 
     int32_t committed_cnodes = 0;
@@ -1579,7 +1757,7 @@ void db_join_commit_all_pending_heal(void) {
         }
     }
     if (committed_cnodes > 0) {
-        nvs_set_i32(main_handle, "cnode_count", main_cnode_count);
+        cnode_save_unsafe(main_handle);
     }
 
     int32_t tmp_crp_count = 0;
@@ -1616,90 +1794,53 @@ void db_join_commit_all_pending_heal(void) {
 }
 
 /**
- * @brief Checks if a challenge string exists anywhere in the CNode table (globally).
- * @param challenge The challenge string to check.
- * @return true if the challenge exists, false otherwise.
+ * @brief Checks if a challenge exists anywhere in the network state or in the data staged by an enrollment.
  */
 bool db_challenge_exists_globally(const char *challenge) {
     bool exists = false;
     TAKE_DB_MUTEX(__FUNCTION__);
-    nvs_handle_t my_handle;
-    if (nvs_open(DB_NAMESPACE, NVS_READONLY, &my_handle) == ESP_OK) {
-        int32_t cnode_count = 0;
-        nvs_get_i32(my_handle, "cnode_count", &cnode_count);
-        
-        for (int i = 0; i < cnode_count; i++) {
-            char key[20];
-            snprintf(key, sizeof(key), "cnode_%d", i);
-            size_t required_size = sizeof(CNodeEntry);
-            CNodeEntry temp_cnode;
-            if (nvs_get_blob(my_handle, key, &temp_cnode, &required_size) == ESP_OK) {
-                if (strcmp(temp_cnode.challenge, challenge) == 0) {
-                    exists = true;
-                    break;
-                }
-            }
+    const char *at = strchr(challenge, '@');
+    uint8_t index;
+    if (at && cnode_parse_challenge(challenge, at + 1, &index)) {
+        int target = cnode_device_index(at + 1, false);
+        for (int k = 0; target >= 0 && k < cnode_count && !exists; k++) {
+            exists = cnode_table[k].target == target && cnode_table[k].index == index;
         }
-        nvs_close(my_handle);
     }
-    
+    nvs_handle_t my_handle;
     if (!exists && nvs_open(DB_TMP_NAMESPACE, NVS_READONLY, &my_handle) == ESP_OK) {
         int32_t count = 0;
-        nvs_get_i32(my_handle, "cnode_count", &count);
-        for (int i = 0; i < count; i++) {
+        nvs_get_i32(my_handle, "tmp_cnode_count", &count);
+        for (int i = 0; i < count && !exists; i++) {
             char key[20];
             snprintf(key, sizeof(key), "cnode_%d", i);
             size_t required_size = sizeof(TmpCNodeEntry);
             TmpCNodeEntry temp_entry;
             if (nvs_get_blob(my_handle, key, &temp_entry, &required_size) == ESP_OK) {
-                if (strcmp(temp_entry.cnode.challenge, challenge) == 0) {
-                    exists = true;
-                    break;
-                }
+                exists = strcmp(temp_entry.cnode.challenge, challenge) == 0;
             }
         }
         nvs_close(my_handle);
     }
-
     GIVE_DB_MUTEX(__FUNCTION__);
     return exists;
 }
 
 /**
- * @brief Retrieves the challenge associated with a specific verifier for the current node.
- * @param verifier_id The ID (IP) of the verifier.
- * @param challenge_buffer Buffer to store the retrieved challenge.
- * @param max_len Maximum number of bytes to write to the buffer.
- * @return true if a challenge was found, false otherwise.
+ * @brief Retrieves one of the challenges of this device assigned to the given Verifier.
  */
 bool db_get_challenge_for_verifier(const char* verifier_id, char* challenge_buffer, size_t max_len) {
     bool found = false;
+    char my_ip[INET_ADDRSTRLEN] = {0};
+    get_my_ip(my_ip, sizeof(my_ip));
     TAKE_DB_MUTEX(__FUNCTION__);
-    nvs_handle_t my_handle;
-    if (nvs_open(DB_NAMESPACE, NVS_READONLY, &my_handle) == ESP_OK) {
-        int32_t cnode_count = 0;
-        nvs_get_i32(my_handle, "cnode_count", &cnode_count);
-        
-        char my_ip[INET_ADDRSTRLEN] = {0};
-        get_my_ip(my_ip, sizeof(my_ip));
-        my_ip[sizeof(my_ip) - 1] = '\0';
-
-        if (my_ip[0] != '\0') {
-            for (int i = 0; i < cnode_count; i++) {
-                char key[20];
-                snprintf(key, sizeof(key), "cnode_%d", i);
-                size_t required_size = sizeof(CNodeEntry);
-                CNodeEntry cnode;
-                if (nvs_get_blob(my_handle, key, &cnode, &required_size) == ESP_OK) {
-                    if (strcmp(cnode.target_ip, my_ip) == 0 && strcmp(cnode.holder_ip, verifier_id) == 0) {
-                        strncpy(challenge_buffer, cnode.challenge, max_len);
-                        found = true;
-                        break;
-                    }
-                }
-            }
+    int me = my_ip[0] ? cnode_device_index(my_ip, false) : -1;
+    int holder = cnode_device_index(verifier_id, false);
+    for (int k = 0; me >= 0 && holder >= 0 && k < cnode_count && !found; k++) {
+        if (cnode_table[k].target == me && cnode_table[k].holder == holder) {
+            cnode_format(&cnode_table[k], challenge_buffer, max_len, NULL, NULL);
+            found = true;
         }
-        nvs_close(my_handle);
     }
     GIVE_DB_MUTEX(__FUNCTION__);
     return found;
