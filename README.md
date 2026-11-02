@@ -348,8 +348,8 @@ Each tagged release of this repository is archived on Zenodo with its own DOI. I
   howpublished = {Zenodo},
   version      = {v1.1.0},
   year         = {2026},
-  doi          = {10.5281/zenodo.21724794},
-  url          = {https://doi.org/10.5281/zenodo.21724794}
+  doi          = {10.5281/zenodo.23890948},
+  url          = {https://doi.org/10.5281/zenodo.23890948}
 }
 ```
 
@@ -358,7 +358,7 @@ Zenodo mints two DOIs for this artifact:
 | DOI | Resolves to | Use it for |
 |---|---|---|
 | [10.5281/zenodo.21724794](https://doi.org/10.5281/zenodo.21724794) | Always the latest release (concept DOI) | Linking to the project in general — this is the badge above |
-| [10.5281/zenodo.21724795](https://doi.org/10.5281/zenodo.21724795) | `v1.0.0` specifically (version DOI) | Citing in a paper, where reproducibility requires a frozen snapshot |
-| Shown on the Zenodo record of each release | That release only (version DOI) | Same as above, for later releases such as `v1.1.0` |
+| [10.5281/zenodo.23890948](https://doi.org/10.5281/zenodo.23890948) | `v1.1.0` specifically (version DOI) | Citing in a paper, where reproducibility requires a frozen snapshot |
+| [10.5281/zenodo.21724795](https://doi.org/10.5281/zenodo.21724795) | `v1.0.0` specifically (version DOI) | The previous release |
 
 GitHub also renders a ready-made citation from [CITATION.cff](CITATION.cff) via the *Cite this repository* button.
